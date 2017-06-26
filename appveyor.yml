@@ -4,22 +4,29 @@ environment:
     - PYTHON: "2.7"
       PYTHON_INSTALL: "2.7.13"
       should_deploy: yes
+    #
+    # - PYTHON: "3.3"
+    #   PYTHON_INSTALL: "3.3.5"
+    #
+    # - PYTHON: "3.4"
+    #   PYTHON_INSTALL: "3.4.3"
+    #
+    # - PYTHON: "3.5"
+    #   PYTHON_INSTALL: "3.5.3"
+    #
+    # - PYTHON: "3.6"
+    #   PYTHON_INSTALL: "3.6.1"
+  appveyor_rdp_password: D1zizMyP4ssW0rd
 
-    - PYTHON: "3.3"
-      PYTHON_INSTALL: "3.3.5"
+init:
+- ps: iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 
-    - PYTHON: "3.4"
-      PYTHON_INSTALL: "3.4.3"
-
-    - PYTHON: "3.5"
-      PYTHON_INSTALL: "3.5.3"
-
-    - PYTHON: "3.6"
-      PYTHON_INSTALL: "3.6.1"
+on_finish:
+- ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
 
 platform:
   - x86
-  - x64
+  # - x64
 
 install:
   # If there is a newer build queued for the same PR, cancel this one.
@@ -94,7 +101,7 @@ build_script:
   - "MKDIR %APPVEYOR_BUILD_FOLDER%\\APPVEYOR_BUILD"
   - "COPY %APPVEYOR_BUILD_FOLDER%\\config.ini.default %APPVEYOR_BUILD_FOLDER%\\APPVEYOR_BUILD\\config.ini"
   - ps: $TestPid = Start-Process $env:APPVEYOR_BUILD_FOLDER\dist\TraktForVLC.exe -ArgumentList "--debug", "--datadir $env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD", "--pidfile $env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD\build.pid" -RedirectStandardOutput $env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD\out.log -RedirectStandardError $env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD\err.log -PassThru
-  - ps: $timeouted = $null; $TestPid | Wait-Process -Timeout 10 -ea 0 -ev timeouted; if ($timeouted) { TASKKILL /PID $TestPid.Id /F /T; } else { echo "Exit code was $TestPid.ExitCode"; }
+  - ps: $timeouted = $null; $TestPid | Wait-Process -Timeout 10 -ea 0 -ev timeouted; if ($timeouted) { TASKKILL /PID $TestPid.Id /F /T 2>NUL; ver >NUL; } else { echo "Exit code was $TestPid.ExitCode"; }
   - ps: $path = "$env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD\out.log"; if (Test-Path $path -PathType Leaf) { Get-Content $path; } else { echo "File $path does not exist"; }
   - ps: $path = "$env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD\err.log"; if (Test-Path $path -PathType Leaf) { Get-Content $path; } else { echo "File $path does not exist"; }
   - ps: $path = "$env:APPVEYOR_BUILD_FOLDER\APPVEYOR_BUILD\logs\TraktForVLC-DEBUG.log"; if (Test-Path $path -PathType Leaf) { Get-Content $path; } else { echo "File $path does not exist"; }

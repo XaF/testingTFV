@@ -52,6 +52,10 @@ import TraktClient
 from vlcrc import VLCRemote
 
 
+if sys.platform.lower().startswith('win'):
+    import ctypes
+
+
 __release_name__ = "Breaking Bad"
 __version_info__ = (1, 3, 0, '-rc4', 0)
 __version__ = "%d.%d.%d%s" % __version_info__[:4]
@@ -194,7 +198,7 @@ class TraktForVLC(object):
 
         self.log = logging.getLogger("TraktForVLC")
 
-        e = 'e' if (sys.platform == 'win32') else 'ë'
+        e = 'e' if sys.platform.lower().startswith('win') else 'ë'
         self.log.info(
             "## TraktForVLC v" + __version__ + " " + __release_name__)
         self.log.info("## Copyright (C) 2014-2015  " +
@@ -759,6 +763,42 @@ def daemonize(pidfile=""):
     if (pidfile):
         open(pidfile, "w").write("%s\n" % str(os.getpid()))
 
+
+# Credits goes to pandel for the hideConsole and showConsole functions
+# https://github.com/pyinstaller/pyinstaller/issues/1339#issuecomment-122909830
+def hideConsole():
+    """
+    Hides the console window in daemon mode. Necessary for frozen
+    application, because this application support both command line
+    execution and daemon mode and theirfor cannot be run via pythonw.exe
+    on Windows
+    """
+    if not sys.platform.lower().startswith('win') or \
+            not getattr(sys, 'frozen', False):
+        return
+
+    whnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if whnd != 0:
+        ctypes.windll.user32.ShowWindow(whnd, 0)
+        # if you wanted to close the handles...
+        # ctypes.windll.kernel32.CloseHandle(whnd)
+
+
+# Credits goes to pandel for the hideConsole and showConsole functions
+# https://github.com/pyinstaller/pyinstaller/issues/1339#issuecomment-122909830
+def showConsole():
+    """
+    Unhides console window
+    """
+    if not sys.platform.lower().startswith('win') or \
+            not getattr(sys, 'frozen', False):
+        return
+
+    whnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if whnd != 1:
+        ctypes.windll.user32.ShowWindow(whnd, 1)
+
+
 if __name__ == '__main__':
     should_pair = should_daemon = False
     pidfile = ""
@@ -812,7 +852,7 @@ if __name__ == '__main__':
 
         # Run as a daemon
         elif o in ('-d', '--daemon'):
-            if sys.platform == 'win32':
+            if sys.platform.lower().startswith('win'):
                 print("Daemonize not supported under Windows, " +
                       "starting normally")
             else:
@@ -857,7 +897,7 @@ if __name__ == '__main__':
 
     if should_daemon:
         daemonize(pidfile)
-    elif (pidfile):
+    elif pidfile:
         open(pidfile, "w").write("%s\n" % str(os.getpid()))
 
     if config == "":
@@ -868,4 +908,11 @@ if __name__ == '__main__':
         datadir,
         configfile,
         daemon=(should_daemon or pidfile))
+
+    if pidfile:
+        hideConsole()
+
     client.run()
+
+    if pidfile:
+        showConsole()
