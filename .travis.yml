@@ -1,0 +1,305 @@
+language: python
+
+matrix:
+    fast_finish: true
+    include:
+        - os: linux
+          python: 2.7
+        - os: osx
+          language: generic
+          env: PYTHON=2.7.14
+
+env:
+    global:
+        - PIPENV=9.0.3
+
+before_install:
+  # Need to disable the boto configuration before starting a sudo-enabled
+  # build in Travis, or the tests will fail (as one of the modules loads
+  # boto)
+  - export BOTO_CONFIG=/dev/null
+  # If we did not define the python version in the environment, set it as
+  # being the one provided by Travis
+  - if [ -z "${PYTHON}" ]; then
+        PYTHON="${TRAVIS_PYTHON_VERSION}";
+    fi
+  # If we are on OSX, we need to devine a number of aliases for GNU commands,
+  # as well as print the OSX software information
+  - if [[ "${TRAVIS_OS_NAME}" == "osx" ]]; then
+        sw_vers;
+        function sort() { $(which gsort) "$@"; };
+        function timeout() { $(which gtimeout) "$@"; };
+    fi
+  # If we are on pypy, determine which is the latest version by using the
+  # bitbucket's API on pypy's repository
+  - if [[ "${PYTHON}" =~ ^pypy ]]; then
+        if [ "${PYTHON}" == "pypy" ]; then
+            PYTHON=pypy2;
+        fi;
+        PYTHON=$(
+            curl "https://api.bitbucket.org/2.0/repositories/pypy/pypy/refs/tags" 2>/dev/null |
+            grep -oE "release-${PYTHON}[a-zA-Z0-9._-]*" |
+            grep -- '-v' |
+            sed -e 's/^release-//g' -e 's/\-v/\-/g' |
+            sort -t'-' -k1,1Vr -k2,2Vr -u |
+            head -n1
+        );
+        if [ -z "${PYTHON}" ]; then
+            echo "ERROR - No PYPY version found.";
+            exit 1;
+        fi;
+        echo "PyPy version - $PYTHON";
+    fi
+  # If we are on OSX, or if we want to use pypy, we need to install the
+  # version of python we want. We are going to use pyenv for that, that will
+  # take care of downloading and compiling python as needed.
+  - if [[ "${TRAVIS_OS_NAME}" == "osx" ]] || [[ "${PYTHON}" =~ ^pypy ]]; then
+        set -x;
+
+        rm -rf ~/.pyenv;
+
+        if [[ "${TRAVIS_OS_NAME}" == "osx" ]]; then
+            export PYTHON_CONFIGURE_OPTS="--enable-framework";
+        else
+            export PYTHON_CONFIGURE_OPTS="--enable-shared";
+        fi;
+
+        git clone --depth 1 https://github.com/pyenv/pyenv ~/.pyenv;
+        PYENV_ROOT="$HOME/.pyenv";
+        PATH="$PYENV_ROOT/bin:$PATH";
+        eval "$(pyenv init -)";
+
+        pyenv install ${PYTHON} || exit 1;
+        pyenv global ${PYTHON} || exit 1;
+
+        pyenv rehash;
+        export PATH=$(python -c "import site, os; print(os.path.join(site.USER_BASE, 'bin'))"):$PATH;
+        python -m pip install --user pipenv==${PIPENV};
+
+        echo $PATH;
+
+        set +x;
+    else
+        pip install pipenv==${PIPENV};
+    fi
+  # Print Python version
+  - python --version
+  - pipenv --version
+  # Install all dependencies
+  - python --version; which python
+  - echo $PATH; pipenv install --dev
+  # If the build should lead to a deployment, check that the tag is valid,
+  # else, check what the current version will be
+  - if [ -n "${TRAVIS_TAG}" ]; then
+        pipenv run ./version.py check-tag --tag=${TRAVIS_TAG} &&
+        environment=$(pipenv run ./version.py environment --version=${TRAVIS_TAG}) &&
+        eval "$environment";
+    else
+        environment=$(pipenv run ./version.py environment) &&
+        eval "$environment";
+    fi &&
+    printenv | grep '^TRAKT_VERSION' | sort
+  # Set the binary name
+  - TRAKT_HELPER_BIN="TraktForVLC_${TRAKT_VERSION}_${TRAVIS_OS_NAME}"
+  # Install VLC
+  - if [[ "${TRAVIS_OS_NAME}" == "osx" ]]; then
+        brew cask install vlc;
+    else
+        sudo apt-get install -y vlc;
+    fi
+  # Print VLC version
+  - vlc --version
+
+install:
+  # Set the version in the Python and LUA scripts
+  - pipenv run ./version.py set --version=${TRAKT_VERSION}
+  # Compile the Lua scripts
+  - vlc -I luaintf --lua-intf luac
+      --lua-config 'luac={input="trakt.lua",output="trakt.luac"}'
+  # Then prepare the binary file
+  - pipenv run pyinstaller
+      --onedir --onefile
+      --name=${TRAKT_HELPER_BIN}
+      --add-data=trakt.luac:.
+      --console trakt_helper.py
+  # Test the binary by first checking if the --version command returns properly
+  - dist/${TRAKT_HELPER_BIN} --version
+  # Then print the help message
+  - dist/${TRAKT_HELPER_BIN} --help
+
+script:
+  # Prepare the variables to know where to check for the installation 
+  - if [[ "${TRAVIS_OS_NAME}" == "osx" ]]; then
+        CONFIG="${HOME}/Library/Application Support/org.videolan.vlc";
+        LUA_USER="${CONFIG}/lua";
+        LUA_SYSTEM="/Applications/VLC.app/Contents/MacOS/share/lua";
+    else
+        CONFIG="${HOME}/.config/vlc";
+        LUA_USER="${HOME}/.local/share/vlc/lua";
+        LUA_SYSTEM="$(python -c "import glob; print(
+            glob.glob('/usr/lib/*/vlc/lua') +
+            glob.glob('/usr/lib/vlc/lua'))[0]")";
+    fi
+
+  ############################################################################
+  # TEST INSTALLATION LOCALLY
+  ############################################################################
+  # Install with default parameters
+  - dist/${TRAKT_HELPER_BIN} --debug install --yes
+  # Check that the helper has been installed
+  - ls -ls "${LUA_USER}/trakt_helper"
+  # And that the Lua interface is also installed
+  - ls -ls "${LUA_USER}/intf/trakt.luac"
+  # Run vlc to check that TraktForVLC is ready
+  - vlc >/tmp/vlc.out 2>&1 & sleep 5; kill $!
+  - sleep 5; cat /tmp/vlc.out
+  # Check that it found the helper
+  - |
+    helper=$(cat /tmp/vlc.out | perl -ne '
+        if ($_ =~ m/\[trakt\] lua interface: helper:/g) {
+            $_ =~ s/^.*\[trakt\] lua interface: helper: //g;
+            print;
+        }')
+    test "$helper" == "${LUA_USER}/trakt_helper"
+    if [ $? -ne 0 ]; then
+        echo "Helper is '${helper}' instead of '${LUA_USER}/trakt_helper'"
+        cat /tmp/vlc.out
+        false
+    else
+        echo "Helper '${helper}' was found"
+    fi
+  # And that it was requesting for Trakt.tv access
+  - |
+    test "$(cat /tmp/vlc.out |
+            perl -ne 'print "OK" if $_ =~ m/^\s*TraktForVLC is not setup/'
+        )" == "OK"
+    if [ $? -ne 0 ]; then
+        echo "TraktForVLC is NOT requesting for Trakt.tv access :("
+        false
+    else
+        echo "TraktForVLC is requesting for Trakt.tv access :)"
+    fi
+  # And that it did not fail before we stopped
+  - |
+    test "$(cat /tmp/vlc.out |
+            perl -ne 'print "NOK" if $_ =~ m/^\s*TraktForVLC setup failed/'
+        )" != "NOK"
+    if [ $? -ne 0 ]; then
+        echo "TraktForVLC failed (setup fail) before we stopped VLC :("
+        false
+    else
+        echo "TraktForVLC did not fail (setup fail) before we stopped VLC :)"
+    fi
+  # Then uninstall
+  - "\"${LUA_USER}/trakt_helper\" --debug uninstall --yes"
+  # And check that the files are not there
+  - test \! -f "${LUA_USER}/trakt_helper"
+  - test \! -f "${LUA_USER}/intf/trakt.luac"
+
+  ############################################################################
+  # IN BETWEEN CLEANING
+  ############################################################################
+  - rm /tmp/vlc.out
+
+  ############################################################################
+  # TEST INSTALLATION SYSTEM-WIDE
+  ############################################################################
+  # Install with default parameters
+  - sudo dist/${TRAKT_HELPER_BIN} --debug install --yes --system
+  # Check that the helper has been installed
+  - ls -ls "${LUA_SYSTEM}/trakt_helper"
+  # And that the Lua interface is also installed
+  - ls -ls "${LUA_SYSTEM}/intf/trakt.luac"
+  # Run vlc to check that TraktForVLC is ready
+  - vlc >/tmp/vlc.out 2>&1 & sleep 5; kill $!
+  - sleep 5; cat /tmp/vlc.out
+  # Check that it found the helper
+  - |
+    helper=$(cat /tmp/vlc.out | perl -ne '
+        if ($_ =~ m/\[trakt\] lua interface: helper:/g) {
+            $_ =~ s/^.*\[trakt\] lua interface: helper: //g;
+            print;
+        }')
+    test "$helper" == "${LUA_SYSTEM}/trakt_helper"
+    if [ $? -ne 0 ]; then
+        echo "Helper is '${helper}' instead of '${LUA_SYSTEM}/trakt_helper'"
+        false
+    else
+        echo "Helper '${helper}' was found"
+    fi
+  # And that it was requesting for Trakt.tv access
+  - |
+    test "$(cat /tmp/vlc.out |
+            perl -ne 'print "OK" if $_ =~ m/^\s*TraktForVLC is not setup/'
+        )" == "OK"
+    if [ $? -ne 0 ]; then
+        echo "TraktForVLC was NOT requesting for Trakt.tv access :("
+        false
+    else
+        echo "TraktForVLC was requesting for Trakt.tv access :)"
+    fi
+  # And that it did not fail before we stopped
+  - |
+    test "$(cat /tmp/vlc.out |
+            perl -ne 'print "NOK" if $_ =~ m/^\s*TraktForVLC setup failed/'
+        )" != "NOK"
+    if [ $? -ne 0 ]; then
+        echo "TraktForVLC failed (setup fail) before we stopped VLC :("
+        false
+    else
+        echo "TraktForVLC did not fail (setup fail) before we stopped VLC :)"
+    fi
+  # Then uninstall
+  - "sudo \"${LUA_SYSTEM}/trakt_helper\" --debug uninstall --yes --system"
+  # And check that the files are not there
+  - test \! -f "${LUA_SYSTEM}/trakt_helper"
+  - test \! -f "${LUA_SYSTEM}/intf/trakt.luac"
+
+before_deploy:
+  - |
+    if [ -n "${TRAVIS_TAG}" ]; then
+        RELEASE_DRAFT=false;
+        if [ -z "${TRAKT_VERSION_PRE_TYPE}" ]; then
+            RELEASE_PRE=false;
+        else
+            RELEASE_PRE=true;
+        fi;
+    else
+        TRAKT_VERSION_NAME="${TRAVIS_BRANCH}-branch";
+        RELEASE_DRAFT=true;
+        RELEASE_PRE=false;
+        TRAKT_VERSION_DESCRIPTION="Draft of release for branch ${TRAVIS_BRANCH}. ${TRAKT_VERSION_DESCRIPTION}";
+    fi
+  - |
+    echo "RELEASE NAME: ${TRAKT_VERSION_NAME}"
+    echo "RELEASE DESCRIPTION: ${TRAKT_VERSION_DESCRIPTION}"
+    echo "IS PRE RELEASE ? ${RELEASE_PRE}"
+    echo "IS RELEASE DRAFT ? ${RELEASE_DRAFT}"
+
+deploy:
+  # Need to duplicate the release as travis do not manage properly the
+  # conversion of 'true' and 'false' strings to booleans
+  - provider: releases
+    name: ${TRAKT_VERSION_NAME}
+    body: ${TRAKT_VERSION_DESCRIPTION}
+    api_key:
+        secure: "Qi7H2XnFYYxHr6DL7dGC/sQ9LB6QWtuTif7x2NZ4NLLMkLzAuI+ZaodpUiKTLXb0atDeHlwV85MKGflP9m7/Gf8kCHp8PGO+dM7ghhYS1qT2918aoU71xzpooWHW4jb15RUvMyK1D29maKtRb43VYTgKMFhd5/QdTXp3qCkmATqck+ZDtbz3kZL8sEeCWKxbhSIBeBuTxpMQ9STFZb9JsnaQdYADZDd1NDv7POXpbaf0Dckv4VvgPJTXCfjRaV/Txp4AxwQNdOOAfafEdHK97TTwJO2ZlCFMGIXZRFLokp3L5r27EVzbWSO8EVmGFh5lHZ2FRlbIDQOOTZFaEjFC/+1MdLnqHZHGkwQHiLA8E1QmwFmJLth7rs3aBcutcuTjvewlII/e7ZwD7Yi9vQc3CdLJ1ydoFMulkYwuBTwtOJ5RAkjx+wdGoZ8frZB7B3zNGquA5orQGSyD6ithE/cKgHsSCNmjbxxXUPAdf/QwEOFto3vSFXXGJxOZgpzBz5SCnqKCivIn/28ZK3nvI5M9qT++Z/+hplZaZoDcXqr0Si5NeDR0y4DntQ96T3iGOCudjcUHQf1k0j0CVsuqWl301FgaPyO7LpM7vo6XN/gR/giO5qrJ+Ofyj8ktOPPIHw+Zqn/BxhM6bGRd0/txW0Rt+DN4H0OffPmSXewC76pV4YQ="
+    file: dist/${TRAKT_HELPER_BIN}
+    draft: false
+    prerelease: true
+    skip_cleanup: true
+    on:
+        condition: '-n "${TRAKT_VERSION_PRE_TYPE}"'
+        tags: true
+  - provider: releases
+    name: ${TRAKT_VERSION_NAME}
+    body: ${TRAKT_VERSION_DESCRIPTION}
+    api_key:
+        secure: "Qi7H2XnFYYxHr6DL7dGC/sQ9LB6QWtuTif7x2NZ4NLLMkLzAuI+ZaodpUiKTLXb0atDeHlwV85MKGflP9m7/Gf8kCHp8PGO+dM7ghhYS1qT2918aoU71xzpooWHW4jb15RUvMyK1D29maKtRb43VYTgKMFhd5/QdTXp3qCkmATqck+ZDtbz3kZL8sEeCWKxbhSIBeBuTxpMQ9STFZb9JsnaQdYADZDd1NDv7POXpbaf0Dckv4VvgPJTXCfjRaV/Txp4AxwQNdOOAfafEdHK97TTwJO2ZlCFMGIXZRFLokp3L5r27EVzbWSO8EVmGFh5lHZ2FRlbIDQOOTZFaEjFC/+1MdLnqHZHGkwQHiLA8E1QmwFmJLth7rs3aBcutcuTjvewlII/e7ZwD7Yi9vQc3CdLJ1ydoFMulkYwuBTwtOJ5RAkjx+wdGoZ8frZB7B3zNGquA5orQGSyD6ithE/cKgHsSCNmjbxxXUPAdf/QwEOFto3vSFXXGJxOZgpzBz5SCnqKCivIn/28ZK3nvI5M9qT++Z/+hplZaZoDcXqr0Si5NeDR0y4DntQ96T3iGOCudjcUHQf1k0j0CVsuqWl301FgaPyO7LpM7vo6XN/gR/giO5qrJ+Ofyj8ktOPPIHw+Zqn/BxhM6bGRd0/txW0Rt+DN4H0OffPmSXewC76pV4YQ="
+    file: dist/${TRAKT_HELPER_BIN}
+    draft: false
+    prerelease: false
+    skip_cleanup: true
+    on:
+        condition: '-z "${TRAKT_VERSION_PRE_TYPE}"'
+        tags: true
