@@ -340,6 +340,7 @@ on_success:
       } else {
           $env:UPDATE_LATEST = "false"
       }
+
   - if [%UPDATE_LATEST%]==[true] (
         pipenv install scikit-ci-addons &
         pipenv run ci_addons publish_github_release --prerelease-packages "dist\\%TRAKT_HELPER_BIN%" --prerelease-packages-clear-pattern "TraktForVLC_*_windows_%PLATFORM%.exe" --prerelease-sha testlua "%APPVEYOR_REPO_NAME%"
