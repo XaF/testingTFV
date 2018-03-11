@@ -28,8 +28,8 @@
 # the results
 #
 
+from __future__ import print_function
 import argparse
-import glob
 import logging
 import os
 import platform
@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -71,7 +72,7 @@ class GitVersionReader(object):
         self._tags = tags
 
     def call_git_describe(self, abbrev=7, exact=False, always=False,
-                          match=False, tags=False, commit=None):
+                          match=False, tags=False, commit=None, dirty=True):
         cmd = ['git', 'describe', '--abbrev={}'.format(abbrev)]
         if tags:
             cmd.append('--tags')
@@ -83,7 +84,7 @@ class GitVersionReader(object):
             cmd.append('--always')
         if commit:
             cmd.append(commit)
-        else:
+        elif dirty:
             cmd.append('--dirty')
 
         try:
@@ -104,7 +105,7 @@ class GitVersionReader(object):
 
         # Version not found, but no error raised
         return None
-    
+
     def call_git_rev_list(self, branch='HEAD'):
         cmd = ['git', 'rev-list', '--count', branch]
 
@@ -156,7 +157,7 @@ class GitVersionReader(object):
 
                 # If we found the commit, it's the one defining the version
                 version = '0.0.0a0-{}-g{}'.format(self.call_git_rev_list(),
-                                                 commit)
+                                                  commit)
 
         if dev or version.endswith('-dirty'):
             vsplit = version.split('-')
@@ -200,7 +201,7 @@ class CIVersionReader(GitVersionReader):
     def check_tag(self, tag=None, abbrev=7):
         if not tag:
             tag = self.call_git_describe(abbrev, exact=True)
-        
+
         # If we did not find any version, we can return now, there
         # is no tag to check
         if not tag:
@@ -230,7 +231,53 @@ class CIVersionReader(GitVersionReader):
 
         return version
 
-    def get_environment(self, version, variables=None, check_previous=True):
+    def get_release_name(self, commit=None, always=False):
+        while 'I have not found a release name':
+            # Try and get the closest tag
+            try:
+                tag = self.call_git_describe(abbrev=0, dirty=False,
+                                             commit=commit)
+            except GitVersionException:
+                # No tag, there is no release name
+                return None
+            else:
+                if not tag:
+                    return None
+
+            # Get that tag's description
+            try:
+                tag_desc = subprocess.check_output(
+                    ['git', 'tag', '-n', tag],
+                    stderr=subprocess.STDOUT,
+                    cwd=self._path,
+                ).strip()
+            except subprocess.CalledProcessError as e:
+                if '.gitconfig' in e.output:
+                    raise GitVersionException(
+                        'You may need to update your git version: {}'.format(
+                            e.output))
+            except OSError as e:
+                if e.strerror != 'No such file or directory':
+                    raise
+
+            # Use a regular expression to check if this leads to a release name
+            relname_re = re.compile(
+                '^{}\s*(?:Prer|R)elease: (?P<relname>.*)$'.format(
+                    re.escape(tag)))
+            m = relname_re.search(tag_desc)
+            if not m:
+                # This tag did not lead to a release name
+                if always:
+                    # try with the commit before it!
+                    commit = '{}^'.format(tag)
+                    continue
+                else:
+                    return None
+
+            return m.group('relname')
+
+    def get_environment(self, version, variables=None, check_previous=True,
+                        asdict=False):
         # Depending on the platform, we will output different format of
         # environment variables to be loaded directly with an eval-like
         # command
@@ -249,6 +296,9 @@ class CIVersionReader(GitVersionReader):
                 'Version {} does not match PEP440 for local version '
                 'identifiers.'.format(version))
 
+        # Prepare a variable to get the release name information
+        relname_commit = None
+
         # Get the results as a dictionary
         values = m.groupdict()
 
@@ -262,6 +312,7 @@ class CIVersionReader(GitVersionReader):
             m_commit = re_commit.search(local)
             if m_commit:
                 values['local_commit'] = m_commit.group('commit')
+                relname_commit = m_commit.group('commit')
                 local = re_commit.sub('', local)
 
             # Check if the repository was considered as dirty
@@ -277,7 +328,7 @@ class CIVersionReader(GitVersionReader):
             if m_pr:
                 values['local_pr'] = m_pr.group('pr')
                 local = re_pr.sub('\g<1>', local)
- 
+
             # If there is still information, that we thus do not expect, raise
             # an exception: the version is not in an expected format
             if local and local != '.':
@@ -290,7 +341,7 @@ class CIVersionReader(GitVersionReader):
             # information
             if check_previous and values['dev_num']:
                 same = False
-                
+
                 parent = self.call_git_describe(
                     commit=m_commit.group('commit'))
                 if parent:
@@ -309,8 +360,9 @@ class CIVersionReader(GitVersionReader):
                                 same = False
                                 break
 
-                if same and (int(values['dev_num']) ==
-                        int(vparent['dev_num']) + int(sparent[1])):
+                if same and values['dev_num'] and vparent['dev_num'] and \
+                        (int(values['dev_num']) ==
+                         int(vparent['dev_num']) + int(sparent[1])):
                     values['parent_dev_num'] = vparent['dev_num']
                     values['relative_dev_num'] = sparent[1]
 
@@ -336,6 +388,7 @@ class CIVersionReader(GitVersionReader):
             local_desc = 'a development version ({}) based on '.format(
                 ', '.join(local_desc_info))
         else:
+            relname_commit = version
             local_desc = ''
 
         # Prepare the dev-related information to be added in the description;
@@ -347,8 +400,11 @@ class CIVersionReader(GitVersionReader):
             dev_num = values.get('parent_dev_num', values['dev_num'])
 
             # Ordinal function taken from Gareth on codegolf
-            ordinal = lambda n: "{}{}".format(
-                n, "tsnrhtdd"[(n / 10 % 10 != 1) * (n % 10 < 4) * n % 10 :: 4])
+            def ordinal(n):
+                return "{}{}".format(
+                    n, "tsnrhtdd"[(n / 10 % 10 != 1) *
+                                  (n % 10 < 4) * n % 10::4])
+
             dev_desc = 'the {} development release of '.format(
                 ordinal(int(dev_num)))
         else:
@@ -395,6 +451,16 @@ class CIVersionReader(GitVersionReader):
 
         # Add the version name
         values['name'] = 'TraktForVLC {}'.format(values['full'])
+        relname = self.get_release_name(commit=relname_commit)
+        if relname:
+            values['release_name'] = relname
+            values['name'] = '{} \\"{}\\"'.format(values['name'], relname)
+
+        if asdict:
+            return {
+                k: v for k, v in values.items()
+                if variables is None or k in variables
+            }
 
         # Prepare the output, for each entry in our dict, we will format one
         # line of output as an environment variable
@@ -417,25 +483,51 @@ class CIVersionReader(GitVersionReader):
         return '\n'.join(output)
 
 
-def set_version(version):
+def set_version(full, release_name=None, **env):
     base = os.path.dirname(os.path.realpath(__file__))
+    reset = (full == '0.0.0a0.dev0')
 
     rules = [
         {
             'files': [
                 os.path.join(base, 'trakt.lua'),
             ],
-            'pattern': re.compile(
-                "^(local __version__ = )'.*'$", re.MULTILINE),
-            'replace': "\g<1>'{}'".format(version),
+            'patterns': [
+                (
+                    re.compile("^(local __version__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(full),
+                ),
+            ]
         },
         {
             'files': [
-                os.path.join(base, 'trakt_helper.py'),
+                os.path.join(base, 'helper', 'version.py'),
             ],
-            'pattern': re.compile(
-                "^(__version__ = )'.*'$", re.MULTILINE),
-            'replace': "\g<1>'{}'".format(version),
+            'patterns': [
+                (
+                    re.compile("^(__version__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(full),
+                ),
+                (
+                    re.compile("^(__release_name__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(
+                        release_name
+                        if release_name and not reset else ''),
+                ),
+                (
+                    re.compile("^(__build_date__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(
+                        time.strftime("%a, %d %b %Y %H:%M:%S +0000",
+                                      time.gmtime())
+                        if not reset else ''),
+                ),
+                (
+                    re.compile("^(__build_system__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(
+                        platform.system()
+                        if not reset else ''),
+                ),
+            ],
         },
     ]
 
@@ -443,12 +535,14 @@ def set_version(version):
         for f in rule['files']:
             fd, tmp = tempfile.mkstemp()
             shutil.copystat(f, tmp)
-            
+
             try:
                 with open(f, 'r') as fin, os.fdopen(fd, 'w') as fout:
-                    out = rule['pattern'].sub(rule['replace'], fin.read())
+                    out = fin.read()
+                    for p, r in rule['patterns']:
+                        out = p.sub(r, out)
                     fout.write(out)
-            except:
+            except Exception:
                 os.remove(tmp)
                 raise
             else:
@@ -458,7 +552,7 @@ def set_version(version):
 def main():
     versionreader = CIVersionReader()
     version = versionreader.get_version()
-    
+
     parser = argparse.ArgumentParser(
         description='Tool to read and set the version for the different '
                     'files of the project')
@@ -467,7 +561,7 @@ def main():
         help='Commands',
         dest='command')
 
-    version_parser = commands.add_parser(
+    commands.add_parser(
         'version',
         help='Will print the computed version')
 
@@ -509,7 +603,8 @@ def main():
     if args.command == 'version':
         print(version)
     elif args.command in 'set':
-        set_version(args.version or version)
+        set_version(**versionreader.get_environment(
+            args.version or version, asdict=True))
         print('OK')
     elif args.command == 'check-tag':
         versionreader.check_tag(tag=args.tag)

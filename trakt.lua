@@ -25,7 +25,7 @@
 -- TraktForVLC version
 local __version__ = '0.0.0a0.dev0'
 
--- The location of the helper
+-- The location of the helper`
 local path_to_helper
 
 ------------------------------------------------------------------------------
@@ -39,6 +39,8 @@ local requests = {}
 local timers = {}
 -- The variable that will store the trakt module
 local trakt = {}
+-- The variable that will store the file module
+local file = {}
 
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
@@ -402,8 +404,9 @@ function get_helper()
     -- Or, most common way, in the module's configuration
     if trakt.config and
             trakt.config.helper and
-            trakt.config.helper ~= '' then
-        table.insert(cfg_location, trakt.config.helper)
+            trakt.config.helper.location and
+            trakt.config.helper.location ~= '' then
+        table.insert(cfg_location, trakt.config.helper.location)
     end
 
     -- If we have any of those indication, try to use it
@@ -464,8 +467,10 @@ end
 ------------------------------------------------------------------------------
 local
 function call_helper(args, discard_stderr)
-    -- Add the helper path to the beginning of the args
-    table.insert(args, 1, path_to_helper)
+    if trakt.config.helper.mode ~= 'service' then
+        -- Add the helper path to the beginning of the args
+        table.insert(args, 1, path_to_helper)
+    end
 
     -- Escape the arguments
     for k, v in pairs(args) do
@@ -478,35 +483,106 @@ function call_helper(args, discard_stderr)
     -- Concatenate them to generate the command
     local command = table.concat(args, ' ')
     vlc.msg.dbg('(call_helper) Executing command: ' .. command)
-    if not discard_stderr then
-        command = command .. ' 2>&1'
+
+    local response
+    local exit_code
+    if trakt.config.helper.mode == 'service' then
+        local maxtry = 1
+        local try = 0
+        while try < maxtry do
+            try = try + 1
+            local sent = -2
+            local fd = vlc.net.connect_tcp(trakt.config.helper.service.host,
+                                           trakt.config.helper.service.port)
+            if fd then
+                sent = vlc.net.send(fd, command .. '\n')
+            end
+
+            if not fd then
+                vlc.msg.err('Unable to connect to helper on ' ..
+                            trakt.config.helper.service.host .. ':' ..
+                            trakt.config.helper.service.port)
+            elseif sent < 0 then
+                vlc.msg.err('Unable to send request to helper on ' ..
+                            trakt.config.helper.service.host .. ':' ..
+                            trakt.config.helper.service.port)
+                vlc.net.close(fd)
+            else
+                local pollfds = {
+                    [fd] = vlc.net.POLLIN,
+                }
+                vlc.net.poll(pollfds)
+
+                response = ""
+                local buf = vlc.net.recv(fd, 2048)
+
+                -- Get the rest of the message
+                while buf and #buf > 0 do
+                    vlc.msg.dbg('Reading buffer; content = ' .. buf)
+                    response = response .. buf
+
+                    vlc.net.poll(pollfds)
+                    buf = vlc.net.recv(fd, 2048)
+                end
+
+                -- Close the connection
+                vlc.net.close(fd)
+
+                -- Try and get the exit code
+                vlc.msg.dbg('Received data before parsing = ' .. response)
+                exit_code, response = response:match('^Exit: (-?[0-9]+)\n(.*)')
+                if exit_code ~= nil then
+                    vlc.msg.dbg('Parsed EXIT_CODE = ' .. exit_code)
+                    vlc.msg.dbg('Parsed RESPONSE = ' .. response)
+                    exit_code = tonumber(exit_code)
+                    break
+                end
+            end
+        end
+
+        if not response then
+            vlc.msg.err('Unable to get command output')
+            return nil
+        end
+    elseif ospath.sep == '\\' then
+        vlc.msg.err('Only the service mode is available on Windows. ' ..
+                    'Standalone mode pops up a window every few ' ..
+                    'seconds... Who would have thought \'Windows\' ' ..
+                    'was so literal?! ;(')
+        return nil
+    else
+        if not discard_stderr then
+            command = command .. ' 2>&1'
+        end
+
+        -- Run the command, and get the output
+        local fpipe = assert(io.popen(command, 'r'))
+        response = assert(fpipe:read('*a'))
+        local closed, exit_reason, exit_code = fpipe:close()
+        -- Lua 5.1 do not manage properly exit codes when using io.popen,
+        -- so if we are using Lua 5.1, or if the exit code is 'nil', we
+        -- will skip that step of checking the exit code. In any case,
+        -- if there was an issue, the json parsing will fail and we will
+        -- be able to catch that error
+        if _VERSION == 'Lua 5.1' then
+            exit_code = nil
+        end
     end
 
-    -- If on Windows, need to enquote the whole command again
-    local on_windows = false
-    if ospath.sep == '\\' then
-        on_windows = true
-        command = '"' .. command .. '"'
-    end
-
-    -- Run the command, and get the output
-    local fpipe = assert(io.popen(command, 'r'))
-    local response = assert(fpipe:read('*a'))
-    local closed, exit_reason, exit_code = fpipe:close()
-    -- MacOS and Windows seem to have 'nil' exit codes, we will let
-    -- them go to the next step as if the json fails parsing, we will
-    -- know there was an issue
     if exit_code ~= nil and exit_code ~= 0 then
         -- We got a problem...
+        vlc.msg.err('(call_helper) Command: ' .. command)
         vlc.msg.err('(call_helper) Command exited with code ' .. tostring(exit_code))
         vlc.msg.err('(call_helper) Command output: ' .. response)
         return nil
     end
-    vlc.msg.dbg('(call_helper) Received response: ' .. response)
+
+    vlc.msg.dbg('(call_helper) Received response: ' .. tostring(response))
 
     -- Decode the JSON returned as response, and check for errors
     local obj, pos, err = json.decode(response)
     if err then
+        vlc.msg.err('(call_helper) Command: ' .. command)
         vlc.msg.err('(call_helper) Unable to parse json')
         vlc.msg.err('(call_helper) Command output: ' .. response)
         return nil
@@ -518,7 +594,9 @@ end
 
 
 ------------------------------------------------------------------------------
--- 
+-- Function to merge a number of intervals provided in the parameter, in order
+-- to get the lowest number of internals that cover the same area as all the
+-- previous intervals
 ------------------------------------------------------------------------------
 local
 function merge_intervals(data)
@@ -558,7 +636,8 @@ end
 
 
 ------------------------------------------------------------------------------
--- 
+-- Function that sums the data represented in form of intervals; the sum
+-- represents the total area covered by the entirety of the intervals
 ------------------------------------------------------------------------------
 local
 function sum_intervals(data)
@@ -772,8 +851,7 @@ local last_cache_save = -1
 -- @param filepath The path to the file to read the data from
 -- @param default The default data returned if there is an error
 ------------------------------------------------------------------------------
-local
-function get_json_file(filepath, default)
+function file.get_json(filepath, default)
     local data = {}
     local file = io.open(filepath, 'r')
 
@@ -784,7 +862,7 @@ function get_json_file(filepath, default)
         if type(data) == 'table' then
             return data
         else
-            vlc.msg.err('(get_json_file) JSON file not in the right format')
+            vlc.msg.err('(file.get_json) JSON file not in the right format')
         end
     else
         vlc.msg.info('No JSON file found at ' .. filepath)
@@ -799,8 +877,7 @@ end
 -- @param filepath The path to the file to write the data to
 -- @param data The table containing the JSON data to write
 ------------------------------------------------------------------------------
-local
-function save_json_file(filepath, data)
+function file.save_json(filepath, data)
     local file = io.open(filepath, 'w')
     if file then
         file:write(json.encode(data, { indent = true }))
@@ -816,7 +893,7 @@ end
 ------------------------------------------------------------------------------
 local
 function get_config()
-    local lconfig = get_json_file(config_file, {})
+    local lconfig = file.get_json(config_file, {})
 
     -- Default configuration version
     if not lconfig.config_version then
@@ -887,6 +964,42 @@ function get_config()
         lconfig.media.stop.check_unprocessed_delay = 120  -- 120 seconds
     end
 
+    -- Default helper config
+    if not lconfig.helper then
+        lconfig.helper = {}
+    end
+    if not lconfig.helper.mode then
+        lconfig.helper.mode = 'standalone'  -- Can be one of 'standalone', 'service'
+    end
+
+    -- Default helper service config
+    if not lconfig.helper.service then
+        lconfig.helper.service = {}
+    end
+    if not lconfig.helper.service.host then
+        lconfig.helper.service.host = 'localhost'
+    end
+    if not lconfig.helper.service.port then
+        lconfig.helper.service.port = 1984
+    end
+
+    -- Default helper update config
+    if not lconfig.helper.update then
+        lconfig.helper.update = {}
+    end
+    if not lconfig.helper.update.check_delay then
+        lconfig.helper.update.check_delay = 86400  -- 24 hours, set to 0 to disable
+    end
+    if not lconfig.helper.update.release_type then
+        lconfig.helper.update.release_type = 'stable' -- Can be one of 'stable',
+                                                      -- 'rc', 'beta', 'alpha' or
+                                                      -- 'latest'
+    end
+    if not lconfig.helper.update.action then
+        lconfig.helper.update.action = 'install'  -- Can be one of 'install',
+                                                  -- 'download' or 'check'
+    end
+
     return lconfig
 end
 
@@ -897,7 +1010,7 @@ end
 ------------------------------------------------------------------------------
 local
 function save_config(config)
-    return save_json_file(config_file, config)
+    return file.save_json(config_file, config)
 end
 
 
@@ -926,7 +1039,9 @@ else
 end
 
 ------------------------------------------------------------------------------
--- 
+-- Function that allows to start the authentication protocol with trakt.tv
+-- through the device code; it will provide the URL and code to use to
+-- allow TraktForVLC to work with trakt.tv
 ------------------------------------------------------------------------------
 function trakt.device_code()
     if trakt.configured then
@@ -953,7 +1068,7 @@ function trakt.device_code()
         error('Unable to generate the device code ' ..
               'for Trakt.tv authentication')
     end
-    
+
     -- If everything went fine, we should have the information that
     -- we need to provide the user for its authentication
     json_body = resp.json
@@ -1055,6 +1170,15 @@ function trakt.device_code()
                 vlc.msg.dbg('Got asked to slow down by the API')
                 sleep(2)
             elseif resp.status_code ~= 200 then
+                vlc.msg.err('(check_token) Request returned with code ' ..
+                            tostring(resp.status_code))
+                if resp.json then
+                    vlc.msg.err('(check_token) Request body: ' ..
+                                dump(resp.json))
+                else
+                    vlc.msg.err('(check_token) Request body: ' ..
+                                dump(resp.body))
+                end
                 return false
             end
 
@@ -1108,7 +1232,9 @@ end
 
 
 ------------------------------------------------------------------------------
--- 
+-- Function that allows to renew authentication tokens using the refresh
+-- token; this will allow to keep TraktForVLC authenticated with trakt.tv
+-- even after the current auth token has expired.
 ------------------------------------------------------------------------------
 function trakt.renew_token()
     if not trakt.configured then
@@ -1142,7 +1268,7 @@ function trakt.renew_token()
         return false
     elseif resp.status_code == 401 then
         vlc.msg.err('Refresh token is invalid')
-        
+
         -- Erase the current auth config... not working
         -- anymore anyway
         trakt.configured = false
@@ -1172,7 +1298,8 @@ end
 
 
 ------------------------------------------------------------------------------
--- 
+-- Function that allows to scrobble with trakt.tv; this will allow to start,
+-- pause, and stop scrobbling.
 ------------------------------------------------------------------------------
 function trakt.scrobble(action, media, percent)
     if not trakt.configured then
@@ -1197,7 +1324,9 @@ function trakt.scrobble(action, media, percent)
     local body = {
         [media['type']] = {
             ['ids'] = {
-                ['imdb'] = string.sub(media['imdb']['id'], 8, -2),
+                ['imdb'] = string.sub(media.imdb.id, 8, -2),
+                ['tvdb'] = media.imdb.tvdbid,
+                ['tmdb'] = media.imdb.tmdbid,
             },
         },
         ['progress'] = percent,
@@ -1230,8 +1359,9 @@ function trakt.scrobble(action, media, percent)
             return true
         elseif resp.status_code ~= 201 then
             vlc.msg.err('Error when trying to ' .. action:lower() ..
-                        ' scrobble: ' .. resp.status_code .. ' ' ..
-                        resp.status_text)
+                        ' scrobble: ' .. tostring(resp.status_code) .. ' ' ..
+                        tostring(resp.reason))
+            vlc.msg.dbg(dump(resp))
             return false
         else
             return resp.json
@@ -1241,7 +1371,7 @@ end
 
 
 ------------------------------------------------------------------------------
---
+-- Function to cancel the currently watching status on trakt.tv
 ------------------------------------------------------------------------------
 function trakt.cancel_watching(media)
     -- As per the Trakt API v2, we need to call the start method saying that
@@ -1251,7 +1381,9 @@ end
 
 
 ------------------------------------------------------------------------------
--- 
+-- Function to add to trakt.tv history for medias that we could not scrobble
+-- in real time (no internet connection, issue identifying media at the time,
+-- etc.)
 ------------------------------------------------------------------------------
 function trakt.add_to_history(medias)
     if not trakt.configured then
@@ -1277,6 +1409,8 @@ function trakt.add_to_history(medias)
                 ['watched_at'] = v.watched_at,
                 ['ids'] = {
                     ['imdb'] = v.imdbid,
+                    ['tvdb'] = v.tvdbid,
+                    ['tmdb'] = v.tmdbid,
                 },
             }
             if v.type == 'movie' then
@@ -1287,9 +1421,11 @@ function trakt.add_to_history(medias)
         end
     end
 
-    if next(movies) == nil or next(episodes) == nil then
+    if next(movies) == nil and next(episodes) == nil then
         error('Nothing to sync ?!')
     end
+    vlc.msg.info('Syncing ' .. tostring(#movies) .. ' movie(s) and ' ..
+                 tostring(#episodes) .. ' episode(s) with Trakt.tv')
 
     local body = {}
     if next(movies) ~= nil then
@@ -1301,14 +1437,17 @@ function trakt.add_to_history(medias)
 
     local try = 0
     while true do
-        -- Query the API to scrobble
+        -- Query the API to add to history
         resp = requests.post{
             url=url,
             headers=headers,
             body=body,
         }
 
-        if resp.status_code == 401 then
+        if not resp then
+            vlc.msg.err('Error when trying to add to history')
+            return false
+        elseif resp.status_code == 401 then
             if try > 0 then
                 vlc.msg.err('Unable to add to history')
                 return false
@@ -1318,7 +1457,8 @@ function trakt.add_to_history(medias)
             try = try + 1
         elseif resp.status_code ~= 201 then
             vlc.msg.err('Error when trying to add to history: ' ..
-                        resp.status_code .. ' ' .. resp.status_text)
+                        tostring(resp.status_code) .. ' ' ..
+                        tostring(resp.status_text))
             return false
         else
             return resp.json
@@ -1338,7 +1478,7 @@ end
 ------------------------------------------------------------------------------
 local
 function get_cache()
-    return get_json_file(cache_file, {})
+    return file.get_json(cache_file, {})
 end
 
 
@@ -1367,12 +1507,13 @@ function save_cache(cache, force)
     end
     last_cache_save = vlc.misc.mdate()
     cache_changed = false
-    return save_json_file(cache_file, cache)
+    return file.save_json(cache_file, cache)
 end
 
 
 ------------------------------------------------------------------------------
---
+-- Function that cleanup the cache of all the media that were not used
+-- recently and that are not waiting to be added to trakt.tv history
 ------------------------------------------------------------------------------
 local
 function cleanup_cache()
@@ -1590,7 +1731,7 @@ function complete_cache_data(key, max_try_obj)
                     ['time'] = cur,
                     ['percent'] = cur / play_total,
                 }
-                
+
                 -- Compute the media name
                 if v.base.titleType == 'tvEpisode' then
                     this_media['name'] = string.format(
@@ -1645,15 +1786,15 @@ function get_current_info()
     infos['meta'] = item:metas()
     -- infos['info'] = item:info()
     infos['play'] = {
-        ['total'] = get_play_time(),
+        ['global'] = get_play_time(),
     }
     infos['ratio'] = {
-        ['total'] = infos['play']['total'] / infos['duration'],
+        ['global'] = infos['play']['global'] / infos['duration'],
     }
     infos['time'] = vlc.misc.mdate()
 
     infos['key'] = infos['uri'] .. '#' .. infos['duration']
-    
+
     -- Check if the media is already in the cache
     if not cache[infos['key']] then
         cache[infos['key']] = {}
@@ -1688,13 +1829,13 @@ function get_current_info()
         cache_changed = true
         loc_cache_changed = true
     end
-    
-    if cache[infos['key']].uri_proto == 'file' and 
+
+    if cache[infos['key']].uri_proto == 'file' and
             (not cache[infos['key']].hash or
              not cache[infos['key']].size) then
         -- Compute the media hash and size
         local media_hash, media_size = movieHash(cache[infos['key']].uri_path)
-        
+
         -- Check if any file in the cache matches those information
         for k,v in pairs(cache) do
             if v.hash == media_hash or v.size == media_size then
@@ -1741,7 +1882,7 @@ function get_current_info()
         cache[infos['key']]['last_use'] = tonumber(date.date)
     else
         vlc.msg.err('(get_current_info) Unable to update the last use ' ..
-                    'date for cache data ' .. key)
+                    'date for cache data ' .. infos['key'])
     end
     -- Only force saving the cache now if the cache has changed, else
     -- the cache will be saved if the delay has passed
@@ -1754,11 +1895,11 @@ function get_current_info()
     if cache[infos['key']].imdb then
         -- Get needed variables locally for performance
         local play_factor = cache[infos['key']].imdb_details.play_factor
-        local play_time_imdb = infos['play']['total'] * play_factor
+        local play_time_imdb = infos['play']['global'] * play_factor
         -- Search the current media
         for k, v in pairs(cache[infos['key']].imdb_details.per_media) do
-            if v['from'].percent <= infos['ratio'].total and
-                    v['to'].percent >= infos['ratio'].total then
+            if v['from'].percent <= infos['ratio'].global and
+                    v['to'].percent >= infos['ratio'].global then
                 infos['local_idx'] = k
                 infos['orig_name'] = infos['name']
                 infos['proper_name'] = v['name']
@@ -1783,6 +1924,8 @@ end
 ------------------------------------------------------------------------------
 local
 function update_watching(media, status)
+    local status_changed
+
     -- If the media has changed
     if not watching or media['key'] ~= watching['key'] then
         -- Create the new watching object for the new media
@@ -1794,27 +1937,30 @@ function update_watching(media, status)
                 ['scrobbled'] = false,
             },
             ['current'] = {
-                ['from'] = media['play']['total'],
-                ['to'] = media['play']['total'],
+                ['from'] = media['play']['global'],
+                ['to'] = media['play']['global'],
             },
         }
+
+        status_changed = true
 
     -- Or if it hasn't changed and we've moved forward in it
     else
         -- Update the status to the status passed as parameter
         if watching['status'] ~= status then
             watching['status'] = status
+            status_changed = true
         end
 
         -- Update the current play and ratio position
-        media_time_diff = media['play']['total'] - watching['play']['total']
+        media_time_diff = media['play']['global'] - watching['play']['global']
         media_time_diff = media_time_diff / get_play_rate()
         intf_time_diff = (media['time'] - watching['last_time']) / 1000000.
 
         -- Check if there was a jump in time, if it's the case, close the
         -- current time set and open a new one
         if media_time_diff < 0 or (media_time_diff / intf_time_diff) > 1.3 then
-            watching['current']['to'] = watching['play']['total']
+            watching['current']['to'] = watching['play']['global']
             table.insert(cache[media['key']].watched,
                          watching['current'])
             cache[media['key']].watched = merge_intervals(
@@ -1826,11 +1972,11 @@ function update_watching(media, status)
         end
 
         if watching['current'] then
-            watching['current']['to'] = media['play']['total']
+            watching['current']['to'] = media['play']['global']
         elseif status == 'playing' then
             watching['current'] = {
-                ['from'] = media['play']['total'],
-                ['to'] = media['play']['total'],
+                ['from'] = media['play']['global'],
+                ['to'] = media['play']['global'],
             }
         end
     end
@@ -1840,6 +1986,12 @@ function update_watching(media, status)
     watching['play'] = media['play']
     watching['ratio'] = media['ratio']
 
+    -- No need to do what is after if we are paused and it is not
+    -- the first loop being paused
+    if status == 'paused' and not status_changed then
+        return
+    end
+
     -- Insure that the cache can receive the watched information
     if not cache[media['key']].watched then
         cache[media['key']].watched = {}
@@ -1847,10 +1999,12 @@ function update_watching(media, status)
 
     -- Bring the intervals locally and merge with the current one
     local temp = cache[media['key']].watched
-    table.insert(temp, {
-        ['from'] = watching['current']['from'],
-        ['to'] = watching['current']['to'],
-    })
+    if watching.current then
+        table.insert(temp, {
+            ['from'] = watching['current']['from'],
+            ['to'] = watching['current']['to'],
+        })
+    end
     temp = merge_intervals(temp)
 
     -- Then save it in the cache
@@ -1858,11 +2012,14 @@ function update_watching(media, status)
     cache_changed = true
 
     -- Compute the watched ratio and play for the media currently being
-    -- watched, from the information that we can read from the cache
-    if cache[media['key']].imdb_details and 
-            cache[media['key']].imdb_details.per_media then 
-        local n = 1
-        local sum = 0
+    -- watched, from the information that we can read from the cache if
+    -- available; if it's not the case, we'll fall back on computing a
+    -- global watched ratio and play for the whole file.
+    local n = 1
+    local sum = 0
+    local vlcduration
+    if cache[media['key']].imdb_details and
+            cache[media['key']].imdb_details.per_media then
         local v = cache[media['key']].imdb_details.per_media[
             media['local_idx']]
         while temp[n] ~= nil and temp[n]['to'] <= v['from'].vlctime do
@@ -1872,7 +2029,7 @@ function update_watching(media, status)
             if temp[n]['from'] >= v['to'].vlctime then
                 break
             end
-            
+
             local add_from = math.max(temp[n]['from'], v['from'].vlctime)
             local add_to = math.min(temp[n]['to'], v['to'].vlctime)
             sum = sum + (add_to - add_from)
@@ -1883,9 +2040,16 @@ function update_watching(media, status)
                 break
             end
         end
-        watching.play.watched = sum
-        watching.ratio.watched = sum / v['vlcduration']
+        vlcduration = v['vlcduration']
+    else
+        while temp[n] ~= nil do
+            sum = sum + (temp[n]['to'] - temp[n]['from'])
+            n = n + 1
+        end
+        vlcduration = media['duration']
     end
+    watching.play.watched = sum
+    watching.ratio.watched = sum / vlcduration
 end
 
 
@@ -1897,15 +2061,16 @@ local
 function media_is_playing(media)
     vlc.msg.info(string.format('%s is playing! :) (%f/%f)',
                                media['name'],
-                               media['play']['total'],
+                               media['play']['global'],
                                media['duration']))
 
     update_watching(media, 'playing')
 
     -- If we keep the watching status in sync
-    if trakt.config.media.start[media['type']] then        
+    if media['type'] and trakt.config.media.start[media['type']] then
         -- Check if we need to scrobble start watching this media on trakt
         if not watching.trakt.watching and media['imdb'] and
+                media['play']['local'] and media['ratio']['local'] and
                 media['play']['local'] >= trakt.config.media.start.time and
                 media['ratio']['local'] * 100. >= trakt.config.media.start.percent then
             -- We need to save the index of the media to know which one we
@@ -1918,19 +2083,53 @@ function media_is_playing(media)
     end
 
     -- If we want to scrobble
-    if trakt.config.media.stop[media['type']] then
-        if not watching.trakt.scrobbled and
-                media['ratio']['local'] * 100. >= trakt.config.media.stop.percent and
-                watching.ratio.watched * 100. >= trakt.config.media.stop.watched_percent then
+    local might_scrobble = false
+    if media['type'] then
+        might_scrobble = trakt.config.media.stop[media['type']]
+    else
+        might_scrobble = (trakt.config.media.stop['episode'] or
+                          trakt.config.media.stop['movie'])
+    end
+    if might_scrobble then
+        -- Determine the current scope: if we do not have imdb information,
+        -- it means that we cannot work in local scope as we cannot know
+        -- the per-media information, we thus need to consider the global
+        -- scope of the media file. This global scope will then be
+        -- converted when possible to the local scope(s).
+        local scope
+        local should_scrobble = false
+        if not watching.trakt.scrobbled then
+            if media['ratio']['local'] then
+                scope = 'local'
+            else
+                scope = 'global'
+            end
+
+            -- Check, using the current scope, that we can actually
+            -- scrobble, following the configuration
+            if media['ratio'][scope] * 100. >= trakt.config.media.stop.percent and
+                    media.ratio.watched * 100. >= trakt.config.media.stop.watched_percent then
+                should_scrobble = true
+            end
+        end
+
+        if should_scrobble then
+            local idx
+            if scope == 'global' then
+                idx = 'all'
+            else
+                idx = media['local_idx']
+            end
+
             -- That way, we won't scrobble the same media two times in a row
             watching.trakt.scrobbled = true
 
             -- Get the date, we'll get it directly in the two formats we'll
             -- need here, one for checking the delay, the other for storing
             -- the information in the cache in case we need it
-            date = call_helper({'date', '--format', '%s.%f',
-                                '--format', '%Y-%m-%dT%H:%M:%S.%fZ'})
-            if not date[1] then
+            local date = call_helper({'date', '--format', '%s.%f',
+                                      '--format', '%Y-%m-%dT%H:%M:%S.%fZ'})
+            if not date or not date[1] then
                 vlc.msg.err('(media_is_playing) Unable to get the current date')
                 return
             end
@@ -1940,11 +2139,24 @@ function media_is_playing(media)
             local ts = tonumber(date[1].date)
             local skip_scrobble = false
             local m_cache = cache[media['key']]
-            if m_cache.last_scrobble and 
-                    m_cache.last_scrobble[media['local_idx']] and
-                    (m_cache.last_scrobble[media['local_idx']] +
-                     trakt.config.media.stop.delay) >= ts then
-                skip_scrobble = true
+            if m_cache.last_scrobble then
+                -- If we are in local scope, check if we have a last scrobble
+                -- information that was registered in global scope, in which
+                -- case, we need to convert it to local scope now that we
+                -- have the full information
+                if scope == 'local' and m_cache.last_scrobble.all then
+                    for kidx, _ in pairs(m_cache.imdb_details.per_media) do
+                        m_cache.last_scrobble[kidx] = math.max(
+                            m_cache.last_scrobble[kidx],
+                            m_cache.last_scrobble.all)
+                    end
+                    m_cache.last_scrobble.all = nil
+                end
+                if m_cache.last_scrobble[idx] and
+                        (m_cache.last_scrobble[idx] +
+                         trakt.config.media.stop.delay) >= ts then
+                    skip_scrobble = true
+                end
             end
 
             -- If we do not skip the scrobble, act on it!
@@ -1954,23 +2166,29 @@ function media_is_playing(media)
                 -- next time if VLC dies or is killed during the scrobble with
                 -- trakt! We don't want to lose any scrobble!
                 local scrobble_ready = {
-                    ['idx'] = media['local_idx'],
+                    ['idx'] = idx,
                     ['when'] = date[2].date,
                 }
-                
+
                 if not m_cache.last_scrobble then
                     m_cache.last_scrobble = {}
-                    for k, _ in pairs(m_cache.imdb) do
-                        m_cache.last_scrobble[k] = -1
-                    end
                 end
                 if not m_cache.scrobble_ready then
                     m_cache.scrobble_ready = {}
                 end
-                m_cache.last_scrobble[media['local_idx']] = ts
+                m_cache.last_scrobble[idx] = ts
                 table.insert(m_cache.scrobble_ready, scrobble_ready)
 
-                -- Clean the 'watched' part of the cache that concerns this episode
+                -- Clean the 'watched' part of the cache that concerns this
+                -- episode; if we are not in episode scope, just clean everything
+                -- from the watched cache as everything should be (and will be)
+                -- scrobbled when we'll be able to
+                if scope == 'global' then
+                    -- By resetting that table, the while for 'per-episode' work
+                    -- will just stop before the first loop even starts
+                    m_cache.watched = {}
+                end
+
                 local i = 1
                 while m_cache.watched[i] ~= nil do
                     local watched = m_cache.watched[i]
@@ -2004,16 +2222,23 @@ function media_is_playing(media)
                 -- Save the cache
                 save_cache(cache, true)
 
-                -- Then try to scrobble on trakt
-                -- Do a stop with a ratio that will absolutely scrobble as watched
-                local is_scrobbled = trakt.scrobble('stop', media, 99.99)
-                -- Then reset the watch status to where we actually are
-                trakt.scrobble('start', media)
+                -- Only try to scrobble if we are in the local scope, as if
+                -- we are not, it means we are missing the imdb information
+                -- that is required to actually scrobble something
+                if scope == 'local' then
+                    -- Then try to scrobble on trakt
+                    -- Do a stop with a ratio that will absolutely scrobble
+                    -- as watched; this allows for users to configure to
+                    -- use lower ratios than Trakt.tv allows for
+                    local is_scrobbled = trakt.scrobble('stop', media, 99.99)
+                    -- Then reset the watch status to where we actually are
+                    trakt.scrobble('start', media)
 
-                -- If it worked, remove from the cache
-                if is_scrobbled then
-                    table.remove(m_cache.scrobble_ready)
-                    save_cache(cache, true)
+                    -- If it worked, remove from the cache
+                    if is_scrobbled then
+                        table.remove(m_cache.scrobble_ready)
+                        save_cache(cache, true)
+                    end
                 end
             end
         end
@@ -2084,11 +2309,31 @@ function process_scrobble_ready()
             media = cache[key]
         end
         if media.imdb and next(sr) ~= nil then
-            -- Remove entries that are not valid
+            -- Go through the loop a first time to remove entries that are
+            -- not valid (invalid index or 'should not be scrobbled' type),
+            -- and if there is entries for 'all', replace them by an entry
+            -- for each media that should be scrobbled
             local index = 1
             local size = #sr
             while index <= size do
-                if not sr[index] or not media.imdb[sr[index].idx] then
+                while sr[index]['idx'] == 'all' do
+                    for k, _ in pairs(media.imdb) do
+                        size = size + 1
+                        sr[size] = {
+                            ['idx'] = k,
+                            ['when'] = sr[index]['when'],
+                        }
+                    end
+                    sr[index] = sr[size]
+                    sr[size] = nil
+                    size = size - 1
+                    cache_changed = true
+                end
+                if not sr[index] or
+                        not media.imdb[sr[index].idx] or
+                        not trakt.config.media.stop[
+                            media.imdb_details.per_media[
+                                sr[index].idx]['type']] then
                     sr[index] = sr[size]
                     sr[size] = nil
                     size = size - 1
@@ -2097,14 +2342,17 @@ function process_scrobble_ready()
                     index = index + 1
                 end
             end
+            -- Create entries to be sync-ed
             for k, v in pairs(sr) do
                 table.insert(medias, {
                     ['watched_at'] = v.when,
                     ['imdbid'] = string.sub(media.imdb[v.idx].base.id, 8, -2),
+                    ['tvdbid'] = media.imdb[v.idx].base.tvdbid,
+                    ['tmdbid'] = media.imdb[v.idx].base.tmdbid,
                     ['type'] = media.imdb_details.per_media[v.idx].type,
                     ['cache'] = {
                         ['key'] = key,
-                        ['idx'] = k,
+                        ['idx'] = v.idx,
                     }
                 })
             end
@@ -2124,7 +2372,8 @@ function process_scrobble_ready()
 
     -- All the medias that we could not add should be kept for another try
     -- next time, we'll thus remove them from the media list, and show an
-    -- error message about them
+    -- error message about them; we will also try to get extra IDs for
+    -- these medias in case we did not find them before
     if #medias > result.added.episodes + result.added.movies then
         local not_found = {}
         for k, v in pairs(result.not_found.movies) do
@@ -2134,14 +2383,82 @@ function process_scrobble_ready()
             table.insert(not_found, v.ids.imdb)
         end
 
+        -- Prepare the command to search for extra ids
+        command = {
+            '--quiet',
+            'extraids',
+        }
+        local need_extra_ids = {}
+
         for _, v in pairs(not_found) do
             for k, m in pairs(medias) do
                 if m and m.imdbid == v then
                     vlc.msg.err('Media ' .. m.cache.key ..
                                 ' (idx: ' .. m.cache.idx .. ')' ..
                                 ' was not added to history')
+
+                    -- Add the media information to the command in order
+                    -- to get extra ids, but only if necessary
+                    if (m['type'] == 'episode' and not m.tvdbid) or
+                            not m.tmdbid then
+                        local imdbinfo = cache[m.cache.key].imdb[m.cache.idx].base
+                        if m['type'] == 'episode' then
+                            table.insert(command, '--episode')
+                            table.insert(command, imdbinfo.parentTitle.title)
+                            table.insert(command, tostring(imdbinfo.season))
+                            table.insert(command, tostring(imdbinfo.episode))
+                            table.insert(command, tostring(imdbinfo.parentTitle.year))
+                        else
+                            table.insert(command, '--movie')
+                            table.insert(command, imdbinfo.title)
+                            table.insert(command, tostring(imdbinfo.year))
+                        end
+
+                        table.insert(need_extra_ids, m)
+                    end
+
                     medias[k] = nil
                 end
+            end
+        end
+
+        -- Run the helper command if needed
+        if #command > 2 then
+            local extra_ids = call_helper(command)
+            if not extra_ids or next(extra_ids) == nil then
+                vlc.msg.dbg('No extra_ids found at all... which is weird')
+                return
+            end
+
+            local loc_cache_changed = false
+
+            -- Then parse the extra ids found for each media
+            for _, m in pairs(need_extra_ids) do
+                local found_extra_ids;
+                local imdbinfo = cache[m.cache.key].imdb[m.cache.idx].base
+                if m['type'] == 'episode' then
+                    found_extra_ids = extra_ids['episode'][
+                        imdbinfo.parentTitle.title][
+                        tostring(imdbinfo.season)][
+                        tostring(imdbinfo.episode)]
+                else
+                    found_extra_ids = extra_ids['movie'][imdbinfo.title]
+                end
+
+                -- If any of those ids was missing, add it, and flag the cache
+                -- to be saved
+                for idname, idvalue in pairs(found_extra_ids) do
+                    idfield = idname .. 'id'
+                    if not imdbinfo[idfield] then
+                        imdbinfo[idfield] = idvalue
+                        loc_cache_changed = true
+                    end
+                end
+            end
+
+            if loc_cache_changed then
+                -- If we found extra ids, force change cache
+                save_cache(cache, true)
             end
         end
     end
@@ -2171,7 +2488,7 @@ end
 
 
 ------------------------------------------------------------------------------
--- Function being run to determine the media status 
+-- Function being run to determine the media status
 ------------------------------------------------------------------------------
 local
 function determine_media_status()
@@ -2195,7 +2512,7 @@ function determine_media_status()
             media_is_paused(infos)
             return
         end
-    
+
         -- If we reach here, it's that the media is currently playing
         media_is_playing(infos)
 
@@ -2210,6 +2527,72 @@ end
 
 
 ------------------------------------------------------------------------------
+-- Function to check if there is any update available for TraktForVLC
+------------------------------------------------------------------------------
+local
+function check_update(filepath, install_output)
+    command = {
+        'update',
+        '--vlc-lua-directory', ospath.dirname(path_to_helper),
+        '--vlc-config', vlc.config.configdir(),
+        '--yes',
+    }
+    if install_output then
+        table.insert(command, 1, '--loglevel')
+        table.insert(command, 2, 'INFO')
+    end
+    if filepath then
+        table.insert(command, '--file')
+        table.insert(command, filepath)
+    else
+        table.insert(command, '--release-type')
+        table.insert(command, trakt.config.helper.update.release_type)
+    end
+    if trakt.config.helper.mode == 'service' then
+        table.insert(command, '--service')
+        table.insert(command, '--service-host')
+        table.insert(command, tostring(trakt.config.helper.service.host))
+        table.insert(command, '--service-port')
+        table.insert(command, tostring(trakt.config.helper.service.port))
+    end
+    if trakt.config.helper.update.action == 'install' then
+        table.insert(command, '--install')
+        if install_output then
+            table.insert(command, '--install-output')
+            table.insert(command, install_output)
+        else
+            table.insert(command, '--discard-install-output')
+        end
+    elseif trakt.config.helper.update.action == 'download' then
+        table.insert(command, '--download')
+    end
+    local update = call_helper(command)
+    if not update or next(update) == nil then
+        vlc.msg.info('No update found for TraktForVLC.')
+        return
+    end
+
+    if update.version then
+        vlc.msg.info('Found TraktForVLC version ' .. update.version)
+    else
+        update.version = 'unknown'
+    end
+
+    if update.downloaded then
+        vlc.msg.info('TraktForVLC version ' ..
+                     update.version .. ' has been downloaded')
+    end
+
+    if update.installing then
+        vlc.msg.info('TraktForVLC version ' ..
+                     update.version .. ' is being installed ' ..
+                     '(will work after VLC restart)')
+    end
+
+    return true
+end
+
+------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
 -- MAIN OF THE INTERFACE                                                    --
 ------------------------------------------------------------------------------
@@ -2217,21 +2600,6 @@ end
 
 -- Print information about the interface when starting up
 vlc.msg.info('TraktForVLC ' .. __version__ .. ' - Lua implementation')
-
---log.file = '/home/xaf/git/TraktForVLC-lua/log-test.txt'
---log.info('Pouet')
-
---vlc.msg.info('CONFIG: ' .. dump(config))
---vlc.msg.info('CONFIG.a: ' .. dump(config.a))
---vlc.msg.info('CONFIGDIR: ' .. dump(vlc.config.configdir()))
---vlc.msg.info('TraktConfig: ' .. dump(get_config()))
-
--- req = requests.get('http://www.google.ca/')
--- print(dump(req))
-
--- print(dump(trakt.device_code()))
--- sleep(2)
--- vlc.misc.quit()
 
 -- Locate the helper
 if not path_to_helper then
@@ -2313,6 +2681,34 @@ if config.autostart then
                     'be one of \'enable\' or \'disable\'')
     end
     vlc.misc.quit()
+elseif config.check_update then
+    if not config.check_update.file then
+        vlc.msg.err('You forgot to specify the file to use for the update test')
+    else
+        vlc.msg.info('Will run check_update with parameter: ' .. config.check_update.file)
+        if config.check_update.output then
+            vlc.msg.info('Output will be written to ' .. config.check_update.output)
+        else
+            vlc.msg.info('Output will be discarded')
+        end
+        worked = check_update(config.check_update.file, config.check_update.output)
+        if not worked then
+            vlc.msg.err('Error while trying to update!')
+        else
+            vlc.msg.info('Sleeping ' .. tostring(config.check_update.wait) ..
+                         ' seconds to emulate the fact that VLC is using the files...')
+            local i = config.check_update.wait
+            while i > 0 do
+                sleep(1)
+                i = i - 1
+                if i % 10 == 0 then
+                    vlc.msg.info(tostring(i) .. ' seconds left...')
+                end
+            end
+        end
+        vlc.msg.info('Exiting.')
+    end
+    vlc.misc.quit()
 else
     -- If TraktForVLC is not yet configured with Trakt.tv, launch the device code
     -- authentication process
@@ -2325,6 +2721,11 @@ else
         trakt.config.media.stop.check_unprocessed_delay * 1000000.))
     timers.register(cleanup_cache, (
         trakt.config.cache.delay.cleanup * 1000000.))
+    if trakt.config.helper.update.check_delay ~= 0 and
+            __version__ ~= '0.0.0a0.dev0' then
+        timers.register(check_update, (
+            trakt.config.helper.update.check_delay * 1000000.))
+    end
 
     -- Main loop
     while trakt.configured do
