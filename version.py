@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -425,17 +426,36 @@ def set_version(version):
             'files': [
                 os.path.join(base, 'trakt.lua'),
             ],
-            'pattern': re.compile(
-                "^(local __version__ = )'.*'$", re.MULTILINE),
-            'replace': "\g<1>'{}'".format(version),
+            'patterns': [
+                (
+                    re.compile("^(local __version__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(version),
+                ),
+            ]
         },
         {
             'files': [
                 os.path.join(base, 'trakt_helper.py'),
             ],
-            'pattern': re.compile(
-                "^(__version__ = )'.*'$", re.MULTILINE),
-            'replace': "\g<1>'{}'".format(version),
+            'patterns': [
+                (
+                    re.compile("^(__version__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(version),
+                ),
+                (
+                    re.compile("^(__build_date__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(
+                        time.strftime("%a, %d %b %Y %H:%M:%S +0000",
+                                      time.gmtime())
+                        if version != '0.0.0a0.dev0' else ''),
+                ),
+                (
+                    re.compile("^(__build_system__ = )'.*'$", re.MULTILINE),
+                    "\g<1>'{}'".format(
+                        platform.system()
+                        if version != '0.0.0a0.dev0' else ''),
+                ),
+            ],
         },
     ]
 
@@ -446,7 +466,9 @@ def set_version(version):
             
             try:
                 with open(f, 'r') as fin, os.fdopen(fd, 'w') as fout:
-                    out = rule['pattern'].sub(rule['replace'], fin.read())
+                    out = fin.read()
+                    for p, r in rule['patterns']:
+                        out = p.sub(r, out)
                     fout.write(out)
             except:
                 os.remove(tmp)

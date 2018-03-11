@@ -1,5 +1,10 @@
 language: python
 
+branches:
+  except:
+    - latest
+    - latest-tmp
+
 matrix:
     fast_finish: true
     include:
@@ -12,6 +17,7 @@ matrix:
 env:
     global:
         - PIPENV=9.0.3
+        - secure: "GDJKcinm+b5qHrdQOJQpXLVdGFYbwhIfZhg89MqAkqolOb3dJ3zRy0+ax1+FuGUtTyAE6A9WI1peM3CGP2TzwT+nv7/nsjusz4dKRbTEpHHd87bDmwJg35CkmPauUN7owbnk7z22GVkG5PDqNSD1wPq0QhVkMOBaeGByKW/1tOKnz2Eexloiy91j6CQ+vqO9/lnsC2MnQLU5Ywa+tlgekXydXJ7mH3FXcElV/o3nT7sGCQeneLeeY1XkKyr0IkS0dAaYt2Wryxn4qBAn9M+9ypFi5OJnazOu21BMF+8uf2Tjm5pI2g/xQXkUOjoqEEbilzTVL7kUHzBcqLltqRDvf5NTQWkzE9W8aHDrUZvTvKk92Z7T67011L883S90dBnxe5QRxFJ8HKS+MHYiJAx9WxGxeF3SL1i7YannMVgSw7l26X7n2ojncgGecnw0HSVzyihqgEGrYovbagrOE7+Fzi2HMRT2Psb6cW//vrrBNr1mWju+3dkka52ROSC28H+Krxu+Lbif6NoHRjY01DirxoNuyAODWwCjuMuUxMLeH6DChmexn6EMk5B/kbKwa3XFtpkmHBgOS3xcdzEgx9X9ZOSewygCX/C2xJ6BggW079hFmgDAawVkcryeFzyfjWyj4k+lSAsW588akVhSPyeIH8fC2z92S5H74V15zSykjWw="
 
 before_install:
   # Need to disable the boto configuration before starting a sudo-enabled
@@ -29,6 +35,8 @@ before_install:
         sw_vers;
         function sort() { $(which gsort) "$@"; };
         function timeout() { $(which gtimeout) "$@"; };
+        export HOMEBREW_NO_AUTO_UPDATE=1;
+        brew install gnu-sed --with-default-names;
     fi
   # If we are on pypy, determine which is the latest version by using the
   # bitbucket's API on pypy's repository
@@ -100,7 +108,7 @@ before_install:
     fi &&
     printenv | grep '^TRAKT_VERSION' | sort
   # Set the binary name
-  - TRAKT_HELPER_BIN="TraktForVLC_${TRAKT_VERSION}_${TRAVIS_OS_NAME}"
+  - TRAKT_HELPER_BIN=$(echo "TraktForVLC_${TRAKT_VERSION}_${TRAVIS_OS_NAME}" | sed -r 's/[^a-zA-Z0-9_.-]+/./g')
   # Install VLC
   - if [[ "${TRAVIS_OS_NAME}" == "osx" ]]; then
         brew cask install vlc;
@@ -282,8 +290,7 @@ deploy:
   - provider: releases
     name: ${TRAKT_VERSION_NAME}
     body: ${TRAKT_VERSION_DESCRIPTION}
-    api_key:
-        secure: "Qi7H2XnFYYxHr6DL7dGC/sQ9LB6QWtuTif7x2NZ4NLLMkLzAuI+ZaodpUiKTLXb0atDeHlwV85MKGflP9m7/Gf8kCHp8PGO+dM7ghhYS1qT2918aoU71xzpooWHW4jb15RUvMyK1D29maKtRb43VYTgKMFhd5/QdTXp3qCkmATqck+ZDtbz3kZL8sEeCWKxbhSIBeBuTxpMQ9STFZb9JsnaQdYADZDd1NDv7POXpbaf0Dckv4VvgPJTXCfjRaV/Txp4AxwQNdOOAfafEdHK97TTwJO2ZlCFMGIXZRFLokp3L5r27EVzbWSO8EVmGFh5lHZ2FRlbIDQOOTZFaEjFC/+1MdLnqHZHGkwQHiLA8E1QmwFmJLth7rs3aBcutcuTjvewlII/e7ZwD7Yi9vQc3CdLJ1ydoFMulkYwuBTwtOJ5RAkjx+wdGoZ8frZB7B3zNGquA5orQGSyD6ithE/cKgHsSCNmjbxxXUPAdf/QwEOFto3vSFXXGJxOZgpzBz5SCnqKCivIn/28ZK3nvI5M9qT++Z/+hplZaZoDcXqr0Si5NeDR0y4DntQ96T3iGOCudjcUHQf1k0j0CVsuqWl301FgaPyO7LpM7vo6XN/gR/giO5qrJ+Ofyj8ktOPPIHw+Zqn/BxhM6bGRd0/txW0Rt+DN4H0OffPmSXewC76pV4YQ="
+    api_key: ${GITHUB_TOKEN}
     file: dist/${TRAKT_HELPER_BIN}
     draft: false
     prerelease: true
@@ -294,8 +301,7 @@ deploy:
   - provider: releases
     name: ${TRAKT_VERSION_NAME}
     body: ${TRAKT_VERSION_DESCRIPTION}
-    api_key:
-        secure: "Qi7H2XnFYYxHr6DL7dGC/sQ9LB6QWtuTif7x2NZ4NLLMkLzAuI+ZaodpUiKTLXb0atDeHlwV85MKGflP9m7/Gf8kCHp8PGO+dM7ghhYS1qT2918aoU71xzpooWHW4jb15RUvMyK1D29maKtRb43VYTgKMFhd5/QdTXp3qCkmATqck+ZDtbz3kZL8sEeCWKxbhSIBeBuTxpMQ9STFZb9JsnaQdYADZDd1NDv7POXpbaf0Dckv4VvgPJTXCfjRaV/Txp4AxwQNdOOAfafEdHK97TTwJO2ZlCFMGIXZRFLokp3L5r27EVzbWSO8EVmGFh5lHZ2FRlbIDQOOTZFaEjFC/+1MdLnqHZHGkwQHiLA8E1QmwFmJLth7rs3aBcutcuTjvewlII/e7ZwD7Yi9vQc3CdLJ1ydoFMulkYwuBTwtOJ5RAkjx+wdGoZ8frZB7B3zNGquA5orQGSyD6ithE/cKgHsSCNmjbxxXUPAdf/QwEOFto3vSFXXGJxOZgpzBz5SCnqKCivIn/28ZK3nvI5M9qT++Z/+hplZaZoDcXqr0Si5NeDR0y4DntQ96T3iGOCudjcUHQf1k0j0CVsuqWl301FgaPyO7LpM7vo6XN/gR/giO5qrJ+Ofyj8ktOPPIHw+Zqn/BxhM6bGRd0/txW0Rt+DN4H0OffPmSXewC76pV4YQ="
+    api_key: ${GITHUB_TOKEN}
     file: dist/${TRAKT_HELPER_BIN}
     draft: false
     prerelease: false
@@ -303,3 +309,9 @@ deploy:
     on:
         condition: '-z "${TRAKT_VERSION_PRE_TYPE}"'
         tags: true
+
+after_success:
+  - if [ -z "${TRAVIS_TAG}" ] && [ "${TRAVIS_BRANCH}" == "testlua" ] && [ "${TRAVIS_PULL_REQUEST}" == "false" ]; then
+        pipenv install scikit-ci-addons &&
+        pipenv run ci_addons publish_github_release --prerelease-packages "dist/${TRAKT_HELPER_BIN}" --prerelease-packages-clear-pattern "TraktForVLC_*_${TRAVIS_OS_NAME}" --prerelease-packages-keep-pattern "${TRAKT_HELPER_BIN}" --prerelease-sha "${TRAVIS_BRANCH}" --re-upload "${TRAVIS_REPO_SLUG}";
+    fi  

@@ -59,6 +59,9 @@ if platform.system() != 'Windows':
 
 LOGGER = logging.getLogger(__name__)
 __version__ = '0.0.0a0.dev0'
+__build_date__ = ''
+__build_system__ = ''
+__author__ = 'Raphaël Beamonte <raphael.beamonte@gmail.com>'
 
 
 ##############################################################################
@@ -1500,19 +1503,70 @@ def action_runvlc(vlc_bin, parameters):
 
 
 ##############################################################################
+# Class defining the KeepLineBreaksFormatter description help formatter that
+# aims at keeping the line breaks in the help, while providing text wrapping
+# facilities
+class KeepLineBreaksFormatter(argparse.RawDescriptionHelpFormatter):
+    def _fill_text(self, text, width, indent):
+        return '\n'.join(['\n'.join(argparse._textwrap.wrap(line, width))
+                          for line in text.splitlines()])
+
+
+##############################################################################
+# Class defining the PrintVersion argument parser to allow for short and
+# long versions
+class PrintVersion(argparse.Action):
+    def __init__(self, *args, **kwargs):
+        super(PrintVersion, self).__init__(nargs=0, *args, **kwargs)
+    def __call__(self, option_string=None, *args, **kwargs):
+        if option_string == '--short-version':
+            print(__version__)
+            sys.exit(0)
+
+        version_desc = []
+        version_desc.append('TraktForVLC {}{}'.format(
+            __version__,
+            ' for {}'.format(__build_system__) if __build_system__ else ''))
+        version_desc.append('Copyright (C) 2017-2018 {}'.format(__author__))
+        if __build_date__:
+            version_desc.append('Built on {}'.format(__build_date__))
+        version_desc.extend([
+            '',
+            'This program is distributed in the hope that it will be useful,',
+            'but WITHOUT ANY WARRANTY; without even the implied warranty of',
+            'MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the',
+            'GNU General Public License (version 2) for more details.',
+            '',
+            'Source available: https://github.com/XaF/TraktForVLC',
+        ])
+        print('\n'.join(version_desc))
+        sys.exit(0)
+
+
+##############################################################################
 # Main method that will parse the command line arguments and run the function
 # to perform the appropriate actions
 def main():
     parser = argparse.ArgumentParser(
-        description='TraktForVLC helper tool',
+        description='TraktForVLC helper tool, providing an easy way to '
+                    'install/uninstall TraktForVLC, as well as all the '
+                    'commands and actions that cannot be performed directly '
+                    'from the Lua VLC interface.\n\n'
+                    'This program is distributed in the hope that it will be '
+                    'useful, but WITHOUT ANY WARRANTY; without even the '
+                    'implied warranty of MERCHANTABILITY or FITNESS FOR A '
+                    'PARTICULAR PURPOSE.  See the GNU General Public License '
+                    '(version 2) for more details.\n\n'
+                    'Source available: https://github.com/XaF/TraktForVLC',
+        formatter_class=KeepLineBreaksFormatter,
     )
 
     ##########################################################################
     # Parameters available for the tool in general
     parser.add_argument(
-        '-V', '--version',
-        action='version',
-        version='%(prog)s {}'.format(__version__))
+        '-V', '--version', '--short-version',
+        action=PrintVersion,
+        dest='command')
     parser.add_argument(
         '-d', '--debug',
         dest='loglevel',

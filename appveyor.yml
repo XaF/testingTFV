@@ -17,28 +17,52 @@ platform:
   - x64
 
 init:
-  # Taken from scikit-ci-addons/cancel-queued-build.ps1 to cancel the
-  # queued builds that match latest/latest-tmp when using rolling releases
-  # for the latest tag, as this tag is generated automatically after a
-  # success build of the master branch, and artifacts will be uploaded
-  # automatically too.
-  - ps: |
-      (Invoke-RestMethod https://ci.appveyor.com/api/projects/$env:APPVEYOR_ACCOUNT_NAME/$env:APPVEYOR_PROJECT_SLUG/history?recordsNumber=20).builds | Where-Object {$_.status -eq "queued" -and ( $_.tag -match '^latest(-tmp)?$' ) } | %{ $_.version } | %{
-          $msg = "Found build version $_"
-          Write-Host "  $msg"
-          $url = "https://ci.appveyor.com/api/builds/$env:APPVEYOR_ACCOUNT_NAME/$env:APPVEYOR_PROJECT_SLUG/$_"
-          Invoke-RestMethod $url -Method Delete -Headers @{"Authorization" = "Bearer $env:APPVEYOR_API_TOKEN"};
-          Write-Host "  $msg - cancelled"
-      }
-  # If there is a newer build queued for the same PR, cancel this one.
+  # Inspired from scikit-ci-addons's cancel-queued-build.ps1 to cancel
+  # the queued builds that match latest/latest-tmp when using rolling
+  # releases for the latest tag. This also integrates the fact of
+  # cancelling a build if there is a more recent one for the same
+  # pull request.
   # The AppVeyor 'rollout builds' option is supposed to serve the same
   # purpose but it is problematic because it tends to cancel builds pushed
   # directly to master instead of just PR builds (or the converse).
-  # credits: JuliaLang developers.
-  - ps: if ($env:APPVEYOR_PULL_REQUEST_NUMBER -and $env:APPVEYOR_BUILD_NUMBER -ne ((Invoke-RestMethod `
-        https://ci.appveyor.com/api/projects/$env:APPVEYOR_ACCOUNT_NAME/$env:APPVEYOR_PROJECT_SLUG/history?recordsNumber=50).builds | `
-        Where-Object pullRequestId -eq $env:APPVEYOR_PULL_REQUEST_NUMBER)[0].buildNumber) { `
-          throw "There are newer queued builds for this pull request, failing early." }
+  - ps: |
+      Function CancelBuild {
+          $version = $args[0]
+          $url = "https://ci.appveyor.com/api/builds/${env:APPVEYOR_ACCOUNT_NAME}/${env:APPVEYOR_PROJECT_SLUG}/${version}"
+          Invoke-RestMethod $url -Method Delete -Headers @{"Authorization" = "Bearer ${env:APPVEYOR_API_TOKEN}"};
+          Write-Host "  Build version $version - cancelled"
+      }
+      Function DeleteBuild {
+          if ($args[0] -eq 'queued' -or $args[0] -eq 'running') {
+              CancelBuild $args[1]
+          }
+          $buildId = $args[2]
+          $url = "https://ci.appveyor.com/api/builds/${buildId}"
+          Invoke-RestMethod $url -Method Delete -Headers @{"Authorization" = "Bearer ${env:APPVEYOR_API_TOKEN}"};
+          Write-Host "  Build ID $buildID - deleted"
+      }
+      $action_self = $false;
+      (Invoke-RestMethod https://ci.appveyor.com/api/projects/$env:APPVEYOR_ACCOUNT_NAME/$env:APPVEYOR_PROJECT_SLUG/history?recordsNumber=50).builds | %{
+          if ($_.isTag) {
+              if ($_.tag -match '^latest(-tmp)?$') {
+                  if ($_.buildId -eq $env:APPVEYOR_BUILD_ID) {
+                      $action_self = 'delete'
+                  } else {
+                      Write-Host "Found build version $($_.version) (ID $($_.buildId)) for tag $($_.tag)"
+                      DeleteBuild $_.status $_.version $_.buildId
+                  }
+              }
+          } elseif (-not $action_self -and $env:APPVEYOR_PULL_REQUEST_NUMBER -and $_.pullRequestId -and $_.pullRequestId -eq $env:APPVEYOR_PULL_REQUEST_NUMBER -and $env:APPVEYOR_BUILD_NUMBER -lt $_.buildNumber) {
+              $action_self = 'cancel'
+          }
+      }
+      if ($action_self -eq 'delete') {
+          Write-Host "Build is for an exception tag. Deleting self."
+          DeleteBuild 'running' $env:APPVEYOR_BUILD_VERSION $env:APPVEYOR_BUILD_ID
+      } elseif ($action_self -eq 'cancel') {
+          Write-Host "There are newer queued builds for this pull request, cancelling build."; `
+          CancelBuild $env:APPVEYOR_BUILD_VERSION
+      }
   - ps: |
       if ($env:APPVEYOR_RDP_PASSWORD) {
         if ($env:PLATFORM -eq 'x64') {
@@ -115,6 +139,7 @@ install:
   # Set the binary name
   - ps: |
       $env:TRAKT_HELPER_BIN = "TraktForVLC_${env:TRAKT_VERSION}_windows_${env:PLATFORM}.exe"
+      $env:TRAKT_HELPER_BIN = $env:TRAKT_HELPER_BIN -replace "[^a-zA-Z0-9_.-]+", "."
 
   # Install VLC
   - if [%PLATFORM%]==[x64] (
@@ -174,6 +199,109 @@ test_script:
       $env:CONFIG = "${env:APPDATA}\vlc"
       $env:LUA_USER = "${env:CONFIG}\lua"
       $env:LUA_SYSTEM = "${env:VLCPATH}\lua"
+
+  # Prepare the function to get VLC's output; because we are on
+  # windows, output is not returned when running a windowed
+  # application, we will thus run VLC through the helper, and
+  # kill it after a few seconds; it happens that even after doing
+  # that, the vlc-output file stays empty. We will thus wait, and
+  # if after 30sec the file is still empty, try again. This will
+  # only be tried 3 times though.
+  - ps: |
+      Function GetVLCOutput {
+          $logFile = $args[0]
+          $max_retry_vlc = 3
+
+          while ($true) {
+              if (Test-Path "$logFile") {
+                  try {
+                      TASKKILL /IM 'vlc.exe' /T /F
+                  } catch {}
+                  Remove-Item "$logFile"
+              }
+
+              $vlc = Start-Process "${env:APPVEYOR_BUILD_FOLDER}\dist\${env:TRAKT_HELPER_BIN}" 'runvlc' -PassThru -RedirectStandardOutput "$logFile"
+              Start-Sleep -s 5
+              TASKKILL /IM 'vlc.exe'
+              $max_check_file = 6
+              $more = ''
+              while ($max_check_file -gt 0 -and (Get-Content "$logFile") -eq $null) {
+                  echo "Waiting 5 ${more}seconds for VLC Output to be filled"
+                  Start-Sleep -s 5
+                  $more = 'more '
+                  $max_check_file -= 1
+              }
+              if ((Get-Content "$logFile") -eq $null) {
+                  if ($max_retry_vlc -gt 0) {
+                      $max_retry_vlc -= 1
+                  } else {
+                      Throw "Max number of retries reached, still not able to get any data in the VLC log output; aborting.";
+                  }
+              } else {
+                  return
+              }
+          }
+      }
+
+  # Prepare the function to check VLC output and verify that it was
+  # correctly configured with TraktForVLC, and that TraktForVLC has
+  # the right configuration and is requesting for Trakt.tv access
+  - ps: |
+      Function CheckVLCOutput {
+          $logFile = $args[0]
+          $helper = $args[1]
+
+          $matches = Select-String -Path "$logFile" -Pattern '\[trakt\] lua interface: helper: (.*)$'
+          if ($matches.Count -eq 0) {
+              Throw "The line declaring the helper was not found."
+          } elseif ($matches.Matches.Groups[1].Value -ne "$helper") {
+              Throw "The helper found is located at $($matches.Matches.Groups[1].Value) instead of $helper"
+          } else {
+              echo "The helper was correctly found: $($matches.Matches.Groups[1].Value)"
+          }
+          $matches = Select-String -Path "$logFile" -Pattern '^TraktForVLC is not setup'
+          if ($matches.Count -eq 0) {
+              Throw "TraktForVLC was not requesting for Trakt.tv access :("
+          } else {
+              echo "TraktForVLC was requesting for Trakt.tv access :)"
+          }
+          $matches = Select-String -Path "$logFile" -Pattern '^TraktForVLC setup failed'
+          if ($matches.Count -ne 0) {
+              Throw "TraktForVLC failed (setup fail) before we stopped VLC :("
+          } else {
+              echo "TraktForVLC did not fail (setup fail) before we stopped VLC :)"
+          }
+      }
+
+  # Prepare the function to both get VLC output log and check it,
+  # and allow for a number of errors before raising
+  - ps: |
+      Function CheckVLCWithTrakt {
+          $logFile = $args[0]
+          $helper = $args[1]
+
+          $max_try = 2
+          for ($i = 0; $i -lt $max_try; $i++) {
+              echo "Checking VLC with Trakt ($($i+1)/$max_try)"
+
+              GetVLCOutput "$logFile"
+
+              ls "$logFile"
+              Get-Content "$logFile"
+
+              try {
+                  CheckVLCOutput "$logFile" "$helper"
+              } catch {
+                  if ($i -eq ($max_try - 1)) {
+                      throw
+                  }
+                  continue
+              }
+
+              return
+          }
+      }
+
   
   ############################################################################
   # TEST INSTALLATION LOCALLY
@@ -184,42 +312,8 @@ test_script:
   - ps: |
       ls "${env:LUA_USER}\trakt_helper.exe"
       ls "${env:LUA_USER}\intf\trakt.luac"
-  # Run VLC through the helper to save the output, and kill it
-  # after a few seconds
-  - ps: |
-      $vlc = Start-Process "${env:APPVEYOR_BUILD_FOLDER}\dist\${env:TRAKT_HELPER_BIN}" 'runvlc' -PassThru -RedirectStandardOutput 'vlc-output.log'
-      Start-Sleep -s 5
-      TASKKILL /IM 'vlc.exe'
-  # Print VLC's output during that run
-  - ps: |
-      While ((Get-Content "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log") -eq $null) {
-          echo "VLC output file empty, waiting 5 more seconds"
-          Start-Sleep -s 5
-      }
-      ls "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log"
-      Get-Content "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log"
-  # Perform checks of execution using the log of that run
-  - ps: |
-      $matches = Select-String -Path "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" -Pattern '\[trakt\] lua interface: helper: (.*)$'
-      if ($matches.Count -eq 0) {
-          Throw "The line declaring the helper was not found."
-      } elseif ($matches.Matches.Groups[1].Value -ne "${env:LUA_USER}\trakt_helper.exe") {
-          Throw "The helper found is located at $($matches.Matches.Groups[1].Value) instead of ${env:LUA_USER}\trakt_helper.exe"
-      } else {
-          echo "The helper was correctly found: $($matches.Matches.Groups[1].Value)"
-      }
-      $matches = Select-String -Path "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" -Pattern '^TraktForVLC is not setup'
-      if ($matches.Count -eq 0) {
-          Throw "TraktForVLC was not requesting for Trakt.tv access :("
-      } else {
-          echo "TraktForVLC was requesting for Trakt.tv access :)"
-      }
-      $matches = Select-String -Path "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" -Pattern '^TraktForVLC setup failed'
-      if ($matches.Count -ne 0) {
-          Throw "TraktForVLC failed (setup fail) before we stopped VLC :("
-      } else {
-          echo "TraktForVLC did not fail (setup fail) before we stopped VLC :)"
-      }
+  # Check that VLC is correctly configured with TraktForVLC
+  - ps: CheckVLCWithTrakt "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" "${env:LUA_USER}\trakt_helper.exe"
   # Then uninstall
   - "\"%LUA_USER%\\trakt_helper.exe\" --debug uninstall --yes"
   # And check that the files are not there
@@ -247,42 +341,8 @@ test_script:
   - ps: |
       ls "${env:LUA_SYSTEM}\trakt_helper.exe"
       ls "${env:LUA_SYSTEM}\intf\trakt.luac"
-  # Run VLC through the helper to save the output, and kill it
-  # after a few seconds
-  - ps: |
-      $vlc = Start-Process "${env:APPVEYOR_BUILD_FOLDER}\dist\${env:TRAKT_HELPER_BIN}" 'runvlc' -PassThru -RedirectStandardOutput "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log"
-      Start-Sleep -s 5
-      TASKKILL /IM 'vlc.exe'
-  # Print VLC's output during that run
-  - ps: |
-      While ((Get-Content "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log") -eq $null) {
-          echo "VLC output file empty, waiting 5 more seconds"
-          Start-Sleep -s 5
-      }
-      ls "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log"
-      Get-Content "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log"
-  # Perform checks of execution using the log of that run
-  - ps: |
-      $matches = Select-String -Path "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" -Pattern '\[trakt\] lua interface: helper: (.*)$'
-      if ($matches.Count -eq 0) {
-          Throw "The line declaring the helper was not found."
-      } elseif ($matches.Matches.Groups[1].Value -ne "${env:LUA_SYSTEM}\trakt_helper.exe") {
-          Throw "The helper found is located at $($matches.Matches.Groups[1].Value) instead of ${env:LUA_SYSTEM}\trakt_helper.exe"
-      } else {
-          echo "The helper was correctly found: $($matches.Matches.Groups[1].Value)"
-      }
-      $matches = Select-String -Path "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" -Pattern '^TraktForVLC is not setup'
-      if ($matches.Count -eq 0) {
-          Throw "TraktForVLC was not requesting for Trakt.tv access :("
-      } else {
-          echo "TraktForVLC was requesting for Trakt.tv access :)"
-      }
-      $matches = Select-String -Path "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" -Pattern '^TraktForVLC setup failed'
-      if ($matches.Count -ne 0) {
-          Throw "TraktForVLC failed (setup fail) before we stopped VLC :("
-      } else {
-          echo "TraktForVLC did not fail (setup fail) before we stopped VLC :)"
-      }
+  # Check that VLC is correctly configured with TraktForVLC
+  - ps: CheckVLCWithTrakt "${env:APPVEYOR_BUILD_FOLDER}\vlc-output.log" "${env:LUA_SYSTEM}\trakt_helper.exe"
   # Then uninstall
   - "\"%LUA_SYSTEM%\\trakt_helper.exe\" --debug uninstall --yes --system"
   # And check that the files are not there
@@ -334,14 +394,24 @@ deploy:
       appveyor_repo_tag: true
 
 on_success:
+  # Check if we need to update the 'latest' rolling release
   - ps : |
       if ($env:APPVEYOR_REPO_TAG -ne 'true' -and $env:APPVEYOR_REPO_BRANCH -eq 'testlua' -and $env:APPVEYOR_PULL_REQUEST_NUMBER -eq $null -and $env:APPVEYOR_API_TOKEN -ne $null) {
           $env:UPDATE_LATEST = "true"
       } else {
           $env:UPDATE_LATEST = "false"
       }
-
+  # To update the 'latest' rolling release if we are on the right branch
   - if [%UPDATE_LATEST%]==[true] (
         pipenv install scikit-ci-addons &
-        pipenv run ci_addons publish_github_release --prerelease-packages "dist\\%TRAKT_HELPER_BIN%" --prerelease-packages-clear-pattern "TraktForVLC_*_windows_%PLATFORM%.exe" --prerelease-packages-keep-pattern "%TRAKT_HELPER_BIN%" --prerelease-sha testlua "%APPVEYOR_REPO_NAME%"
+        pipenv run ci_addons publish_github_release --prerelease-packages "dist\\%TRAKT_HELPER_BIN%" --prerelease-packages-clear-pattern "TraktForVLC_*_windows_%PLATFORM%.exe" --prerelease-packages-keep-pattern "%TRAKT_HELPER_BIN%" --prerelease-sha "%APPVEYOR_REPO_BRANCH%" --re-upload "%APPVEYOR_REPO_NAME%"
     )
+  # The cancel-queued-build.ps1 script does not take care of deleting the jobs,
+  # and it will become a lot of unused jobs very fast. To keep that clean, we
+  # just run that request at the end to clean it
+  - ps: |
+      if ($env:UPDATE_LATEST -eq "true") {
+          (Invoke-RestMethod https://ci.appveyor.com/api/projects/$env:APPVEYOR_ACCOUNT_NAME/$env:APPVEYOR_PROJECT_SLUG/history?recordsNumber=10).builds | Where-Object {$_.isTag -and $_.tag -match '^latest(-tmp)?$'} | %{
+              DeleteBuild $_.status $_.version $_.buildId
+          }
+      }

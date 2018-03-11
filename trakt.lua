@@ -25,7 +25,7 @@
 -- TraktForVLC version
 local __version__ = '0.0.0a0.dev0'
 
--- The location of the helper
+-- The location of the helper`
 local path_to_helper
 
 ------------------------------------------------------------------------------
@@ -493,16 +493,18 @@ function call_helper(args, discard_stderr)
     local fpipe = assert(io.popen(command, 'r'))
     local response = assert(fpipe:read('*a'))
     local closed, exit_reason, exit_code = fpipe:close()
-    -- MacOS and Windows seem to have 'nil' exit codes, we will let
-    -- them go to the next step as if the json fails parsing, we will
-    -- know there was an issue
-    if exit_code ~= nil and exit_code ~= 0 then
+    -- Lua 5.1 do not manage properly exit codes when using io.popen,
+    -- so if we are using Lua 5.1, or if the exit code is 'nil', we
+    -- will skip that step of checking the exit code. In any case,
+    -- if there was an issue, the json parsing will fail and we will
+    -- be able to catch that error
+    if _VERSION ~= 'Lua 5.1' and exit_code ~= nil and exit_code ~= 0 then
         -- We got a problem...
         vlc.msg.err('(call_helper) Command exited with code ' .. tostring(exit_code))
         vlc.msg.err('(call_helper) Command output: ' .. response)
         return nil
     end
-    vlc.msg.dbg('(call_helper) Received response: ' .. response)
+    vlc.msg.dbg('(call_helper) Received response: ' .. tostring(response))
 
     -- Decode the JSON returned as response, and check for errors
     local obj, pos, err = json.decode(response)
@@ -1055,6 +1057,15 @@ function trakt.device_code()
                 vlc.msg.dbg('Got asked to slow down by the API')
                 sleep(2)
             elseif resp.status_code ~= 200 then
+                vlc.msg.err('(check_token) Request returned with code ' ..
+                            tostring(resp.status_code))
+                if resp.json then
+                    vlc.msg.err('(check_token) Request body: ' ..
+                                dump(resp.json))
+                else
+                    vlc.msg.err('(check_token) Request body: ' ..
+                                dump(resp.body))
+                end
                 return false
             end
 
@@ -1230,8 +1241,9 @@ function trakt.scrobble(action, media, percent)
             return true
         elseif resp.status_code ~= 201 then
             vlc.msg.err('Error when trying to ' .. action:lower() ..
-                        ' scrobble: ' .. resp.status_code .. ' ' ..
-                        resp.status_text)
+                        ' scrobble: ' .. tostring(resp.status_code) .. ' ' ..
+                        tostring(resp.reason))
+            vlc.msg.dbg(dump(resp))
             return false
         else
             return resp.json
@@ -1847,10 +1859,12 @@ function update_watching(media, status)
 
     -- Bring the intervals locally and merge with the current one
     local temp = cache[media['key']].watched
-    table.insert(temp, {
-        ['from'] = watching['current']['from'],
-        ['to'] = watching['current']['to'],
-    })
+    if watching.current then
+        table.insert(temp, {
+            ['from'] = watching['current']['from'],
+            ['to'] = watching['current']['to'],
+        })
+    end
     temp = merge_intervals(temp)
 
     -- Then save it in the cache
