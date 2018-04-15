@@ -81,6 +81,7 @@ def main():
         exit_code = 0
 
     if hasattr(args, 'keep_alive') and args.keep_alive:
+        print('Press a key to continue.')
         raw_input()
 
     sys.exit(exit_code)

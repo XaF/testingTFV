@@ -22,6 +22,7 @@
 
 import date                 # noqa: F401
 import extraids             # noqa: F401
+import init_trakt_auth      # noqa: F401
 import install              # noqa: F401
 import requests             # noqa: F401
 import resolve              # noqa: F401

@@ -124,6 +124,7 @@ class CommandUninstall(CommandInstallUpdateDelete):
         if not to_remove:
             print('No files to be removed. Will still try to disable '
                   'trakt\'s lua interface.')
+            me = None
         else:
             to_remove.sort()
             if getattr(sys, 'frozen', False):
@@ -153,54 +154,6 @@ class CommandUninstall(CommandInstallUpdateDelete):
                 print('Uninstallation aborted by {}.'.format(
                     'signal' if yes_no is None else 'user'))
                 return
-
-        # If there is files to remove, wait to get the right to remove them...
-        # this is only needed for Windows
-        if platform.system() == 'Windows':
-            LOGGER.info('Checking that the files can be deleted...')
-            open_files = []
-            start = time.time()
-            interrupt = False
-            try:
-                for fname in to_remove:
-                    if fname == me:
-                        # Ignore if the file is ourselves, this will be managed
-                        # differently, but for other files it is important
-                        # to check
-                        continue
-
-                    f = None
-                    while not f:
-                        if max_wait is not None and \
-                                start + max_wait > time.time():
-                            raise TimeoutError
-
-                        if not os.path.isfile(fname):
-                            break
-
-                        try:
-                            f = open(fname, 'a')
-                            open_files.append(f)
-                        except Exception as e:
-                            if isinstance(e, KeyboardInterrupt):
-                                raise
-                            LOGGER.debug(e)
-                            LOGGER.debug(
-                                'Waiting 5 seconds before retrying...')
-                            time.sleep(5)
-            except KeyboardInterrupt:
-                LOGGER.info('Aborting.')
-                interrupt = None
-            except TimeoutError:
-                LOGGER.info('Timed out. Aborting.')
-                interrupt = -1
-            finally:
-                # Close the files we were able to open
-                while open_files:
-                    open_files.pop().close()
-
-            if interrupt is not False:
-                return interrupt
 
         # We then need to start VLC with the trakt interface enabled, and
         # pass the autostart=disable parameter so we'll disable the interface
@@ -310,6 +263,54 @@ class CommandUninstall(CommandInstallUpdateDelete):
                     else:
                         # Wait 5 seconds, then check again
                         time.sleep(5)
+
+        # If there is files to remove, wait to get the right to remove them...
+        # this is only needed for Windows
+        if platform.system() == 'Windows':
+            LOGGER.info('Checking that the files can be deleted...')
+            open_files = []
+            start = time.time()
+            interrupt = False
+            try:
+                for fname in to_remove:
+                    if fname == me:
+                        # Ignore if the file is ourselves, this will be managed
+                        # differently, but for other files it is important
+                        # to check
+                        continue
+
+                    f = None
+                    while not f:
+                        if max_wait is not None and \
+                                start + max_wait > time.time():
+                            raise TimeoutError
+
+                        if not os.path.isfile(fname):
+                            break
+
+                        try:
+                            f = open(fname, 'a')
+                            open_files.append(f)
+                        except Exception as e:
+                            if isinstance(e, KeyboardInterrupt):
+                                raise
+                            LOGGER.debug(e)
+                            LOGGER.debug(
+                                'Waiting 5 seconds before retrying...')
+                            time.sleep(5)
+            except KeyboardInterrupt:
+                LOGGER.info('Aborting.')
+                interrupt = None
+            except TimeoutError:
+                LOGGER.info('Timed out. Aborting.')
+                interrupt = -1
+            finally:
+                # Close the files we were able to open
+                while open_files:
+                    open_files.pop().close()
+
+            if interrupt is not False:
+                return interrupt
 
         # Then we remove the files
         for f in to_remove:

@@ -54,9 +54,6 @@ class ActionYesNo(argparse.Action):
     def __init__(self, option_strings, dest, default=None,
                  required=False, help=None):
 
-        if len(option_strings) > 1:
-            raise ValueError(
-                'Only single argument is allowed with Yes/No action')
         opt = option_strings[0]
         if not opt.startswith('--'):
             raise ValueError('Yes/No arguments must be prefixed with --')
@@ -70,17 +67,41 @@ class ActionYesNo(argparse.Action):
             if default is None:
                 default = False
 
-        opts = ['--' + opt, '--no-' + opt]
+        # Save the option as attribute
+        self.opt = opt
+
+        # List of options available for that
+        opts = ['--{}'.format(opt), '--no-{}'.format(opt)]
+
+        # Check that all other options are acceptable
+        for extra_opt in option_strings[1:]:
+            if not extra_opt.startswith('--'):
+                raise ValueError('Yes/No arguments must be prefixed with --')
+            if not extra_opt.endswith('-{}'.format(opt)):
+                raise ValueError(
+                    'Only single argument is allowed with Yes/No action')
+
+            opts.append(extra_opt)
 
         super(ActionYesNo, self).__init__(
             opts, dest, nargs=0, const=None, default=default,
             required=required, help=help)
 
     def __call__(self, parser, namespace, values, option_strings=None):
-        if option_strings.startswith('--no-'):
+        if option_strings == '--{}'.format(self.opt):
+            setattr(namespace, self.dest, True)
+        elif option_strings == '--no-{}'.format(self.opt):
             setattr(namespace, self.dest, False)
         else:
-            setattr(namespace, self.dest, True)
+            opt = option_strings[2:-len(self.opt) - 1]
+            boolean = True
+            if opt.startswith('no-'):
+                boolean = False
+                opt = opt[3:]
+            elif opt.endswith('-no'):
+                boolean = False
+                opt = opt[:-3]
+            setattr(namespace, self.dest, (boolean, opt))
 
 
 ##############################################################################

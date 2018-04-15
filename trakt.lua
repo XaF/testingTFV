@@ -2601,6 +2601,22 @@ end
 -- Print information about the interface when starting up
 vlc.msg.info('TraktForVLC ' .. __version__ .. ' - Lua implementation')
 
+-- Check that local configuration parameters are authorized
+local bad_config = false
+for k, v in pairs(config) do
+    if k ~= 'autostart' and
+            k ~= 'check_update' and
+            k ~= 'init_auth' then
+        vlc.msg.error('Configuration option ' .. tostring(k) ..
+                      'is not recognized.')
+        bad_config = true
+    end
+end
+if bad_config then
+    vlc.msg.error('Quitting VLC.')
+    vlc.misc.quit()
+end
+
 -- Locate the helper
 if not path_to_helper then
     path_to_helper = get_helper()
@@ -2708,6 +2724,17 @@ elseif config.check_update then
         end
         vlc.msg.info('Exiting.')
     end
+    vlc.misc.quit()
+elseif config.init_auth then
+    -- Delete current configuration, as we are going to regenerate it
+    trakt.configured = false
+    trakt.config.auth = {}
+    save_config(trakt.config)
+
+    -- Start the process to authenticate TraktForVLC with Trakt.tv
+    trakt.device_code()
+
+    -- Exit VLC when finished
     vlc.misc.quit()
 else
     -- If TraktForVLC is not yet configured with Trakt.tv, launch the device code

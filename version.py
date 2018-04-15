@@ -284,9 +284,11 @@ class CIVersionReader(GitVersionReader):
         if platform.system() == 'Windows':
             env_format = '$env:{key} = {value};'
             true_format = '$true'
+            escaped_quote = '`"'
         else:
             env_format = 'export {key}={value}'
             true_format = '1'
+            escaped_quote = '\\"'
 
         # First, match the version with the local version format of PEP440,
         # if it does not match, we're having a problem.
@@ -454,7 +456,8 @@ class CIVersionReader(GitVersionReader):
         relname = self.get_release_name(commit=relname_commit)
         if relname:
             values['release_name'] = relname
-            values['name'] = '{} \\"{}\\"'.format(values['name'], relname)
+            values['name'] = '{} "{}"'.format(
+                values['name'], relname).replace('"', escaped_quote)
 
         if asdict:
             return {

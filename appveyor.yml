@@ -185,7 +185,7 @@ build_script:
   - ps: |
       & "${env:VLCEXE}" -I luaintf --lua-intf luac --lua-config "luac={input='trakt.lua',output='trakt.luac'}"
   # Then prepare the exe file
-  - "pipenv run pyinstaller --onedir --onefile --name=%TRAKT_HELPER_BIN% --hidden-import=concurrent.futures --add-data=trakt.luac;. --console trakt_helper.py"
+  - "pipenv run pyinstaller --onedir --onefile --name=%TRAKT_HELPER_BIN% --hidden-import=concurrent.futures --add-data=trakt.luac;. --add-data=vlc-logo-1s.mp4;. --console trakt_helper.py"
   # Test the exe file by first checking if the --version command returns properly
   - "\"%APPVEYOR_BUILD_FOLDER%\\dist\\%TRAKT_HELPER_BIN%\" --version"
   # Then print the help message
@@ -304,7 +304,7 @@ test_script:
   # TEST INSTALLATION AS A SERVICE (SYSTEM)
   ############################################################################
   # Install with default parameters
-  - "\"%APPVEYOR_BUILD_FOLDER%\\dist\\%TRAKT_HELPER_BIN%\" --debug install --service --yes"
+  - "\"%APPVEYOR_BUILD_FOLDER%\\dist\\%TRAKT_HELPER_BIN%\" --debug install --service --yes --no-init-trakt-auth"
   # Then we need to check if everything was installed as we would expect
   - ps: |
       ls "${env:LUA_SYSTEM}\trakt_helper.exe"
@@ -450,7 +450,8 @@ before_deploy:
   - ps: 'echo "IS RELEASE DRAFT ? $env:RELEASE_DRAFT"'
 
 deploy:
-  - release: $(TRAKT_VERSION_NAME)
+  - tag: $(APPVEYOR_REPO_TAG_NAME)
+    release: $(TRAKT_VERSION_NAME)
     description: $(TRAKT_VERSION_DESCRIPTION)
     provider: GitHub
     auth_token: $(GITHUB_TOKEN)

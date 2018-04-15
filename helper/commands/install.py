@@ -33,6 +33,9 @@ import stat
 import subprocess
 import sys
 
+from helper.commands.init_trakt_auth import (
+    CommandInitTraktAuth,
+)
 from helper.commands.service import (
     run_windows_service,
 )
@@ -120,8 +123,22 @@ class CommandInstall(CommandInstallUpdateDelete):
     command = 'install'
     description = 'To install TraktForVLC'
 
+    def add_arguments(self, parser):
+        super(CommandInstall, self).add_arguments(parser)
+
+        parser.add_argument(
+            '--init-trakt-auth', '--force-init-trakt-auth',
+            help='To initialize the authentication with Trakt.tv during the '
+                 'installation process; By default, the authentication '
+                 'process will be started only if no configuration file '
+                 'exists, but the --force-init-trakt-auth option allows to '
+                 'execute it in any case.',
+            default=True,
+            action=ActionYesNo,
+        )
+
     def run(self, dry_run, yes, system, service, service_host, service_port,
-            vlc_bin, vlc_config, vlc_lua):
+            vlc_bin, vlc_config, vlc_lua, init_trakt_auth):
         if service and platform.system() != 'Windows':
             LOGGER.error('The service mode is not supported yet for {}'.format(
                 platform.system()))
@@ -310,10 +327,12 @@ class CommandInstall(CommandInstallUpdateDelete):
         trakt_config = os.path.join(config, 'trakt_config.json')
         data = {}
         data_updated = False
+        config_file_exists = False
         if os.path.isfile(trakt_config):
             LOGGER.info('Configuration file exists, reading current values')
             with open(trakt_config, 'r') as f:
                 data = json.load(f)
+            config_file_exists = True
 
         if service:
             data_updated = True
@@ -328,7 +347,16 @@ class CommandInstall(CommandInstallUpdateDelete):
             data['helper']['service']['host'] = service_host
             data['helper']['service']['port'] = service_port
         elif data.get('helper', {}).get('mode', 'standalone') != 'standalone':
+            LOGGER.info(
+                'Configuring TraktForVLC helper to be used as standalone')
             data['helper']['mode'] = 'standalone'
+            data_updated = True
+
+        # In the future, this might be useful to actually reorganize
+        # configuration if there has been any change
+        if data and data.get('config_version') != __version__:
+            LOGGER.info('Update configuration version')
+            data['config_version'] = __version__
             data_updated = True
 
         if data_updated and not dry_run:
@@ -380,3 +408,10 @@ class CommandInstall(CommandInstallUpdateDelete):
             return -1
 
         LOGGER.info('TraktForVLC v{} is now installed. :D'.format(__version__))
+
+        # Initialize the configuration if requested
+        if (init_trakt_auth is True and not config_file_exists) or \
+                init_trakt_auth == (True, 'force'):
+            LOGGER.info('Initializing authentication with Trakt.tv')
+            init_trakt = CommandInitTraktAuth()
+            init_trakt.run(vlc_bin=vlc_bin)

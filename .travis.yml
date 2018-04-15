@@ -154,7 +154,7 @@ script:
   # TEST INSTALLATION LOCALLY
   ############################################################################
   # Install with default parameters
-  - dist/${TRAKT_HELPER_BIN} --debug install --yes
+  - dist/${TRAKT_HELPER_BIN} --debug install --yes --no-init-trakt-auth
   # Check that the helper has been installed
   - ls -ls "${LUA_USER}/trakt_helper"
   # And that the Lua interface is also installed
@@ -200,7 +200,6 @@ script:
         echo "TraktForVLC did not fail (setup fail) before we stopped VLC :)"
     fi
   # Test the update tool
-  #- "\"${LUA_USER}/trakt_helper\" --debug update --file=\"dist/${TRAKT_HELPER_BIN}\" --install --yes"
   - |
     vlc --lua-config "trakt={check_update={file=\"$(pwd)/dist/${TRAKT_HELPER_BIN}\",wait=30,output=\"/tmp/update_output.log\"}}";
     ls "/tmp/update_output.log";
@@ -220,7 +219,7 @@ script:
   # TEST INSTALLATION SYSTEM-WIDE
   ############################################################################
   # Install with default parameters
-  - sudo dist/${TRAKT_HELPER_BIN} --debug install --yes --system
+  - sudo dist/${TRAKT_HELPER_BIN} --debug install --yes --system --no-init-trakt-auth
   # Check that the helper has been installed
   - ls -ls "${LUA_SYSTEM}/trakt_helper"
   # And that the Lua interface is also installed
