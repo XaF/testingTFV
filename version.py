@@ -245,6 +245,7 @@ class CIVersionReader(GitVersionReader):
                     return None
 
             # Get that tag's description
+            tag_desc = None
             try:
                 tag_desc = subprocess.check_output(
                     ['git', 'tag', '-n', tag],
@@ -260,6 +261,9 @@ class CIVersionReader(GitVersionReader):
                 if e.strerror != 'No such file or directory':
                     raise
 
+            if tag_desc is None:
+                return
+
             # Use a regular expression to check if this leads to a release name
             relname_re = re.compile(
                 '^{}\s*(?:Prer|R)elease: (?P<relname>.*)$'.format(
@@ -272,7 +276,7 @@ class CIVersionReader(GitVersionReader):
                     commit = '{}^'.format(tag)
                     continue
                 else:
-                    return None
+                    return
 
             return m.group('relname')
 
@@ -490,6 +494,17 @@ def set_version(full, release_name=None, **env):
     base = os.path.dirname(os.path.realpath(__file__))
     reset = (full == '0.0.0a0.dev0')
 
+    def build_system_release():
+        if not reset:
+            if platform.system() == 'Linux':
+                return ' '.join(platform.linux_distribution()[:2])
+            elif platform.system() == 'Darwin':
+                return 'macOS {}'.format(platform.mac_ver()[0])
+            elif platform.system() == 'Windows':
+                return 'Windows {}'.format(platform.win32_ver()[0])
+        
+        return ''
+
     rules = [
         {
             'files': [
@@ -529,6 +544,11 @@ def set_version(full, release_name=None, **env):
                     "\g<1>'{}'".format(
                         platform.system()
                         if not reset else ''),
+                ),
+                (
+                    re.compile("^(__build_system_release__ = )'.*'$",
+                               re.MULTILINE),
+                    "\g<1>'{}'".format(build_system_release()),
                 ),
             ],
         },
