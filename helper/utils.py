@@ -88,6 +88,10 @@ def get_vlc():
             fpath = os.path.join(p, 'VideoLAN', 'VLC', 'vlc.exe')
             if os.path.isfile(fpath):
                 return fpath
+    elif platform.system() == 'Darwin':
+        fpath = '/Applications/VLC.app/Contents/MacOS/VLC'
+        if os.path.isfile(fpath) and os.access(fpath, os.X_OK):
+            return fpath
     return distutils.spawn.find_executable('vlc')
 
 
@@ -148,13 +152,14 @@ def get_os_config(system=None, config=None, lua=None):
                     lua = os.path.join(home, '.local', 'share', 'vlc', 'lua')
         elif opsys == 'Darwin':
             if not config:
-                config = os.path.join(home, 'Library', 'Application Support',
+                config = os.path.join(home, 'Library', 'Preferences',
                                       'org.videolan.vlc')
             if not lua:
                 if system:
                     lua = '/Applications/VLC.app/Contents/MacOS/share/lua'
                 else:
-                    lua = os.path.join(config, 'lua')
+                    lua = os.path.join(home, 'Library', 'Application Support',
+                                       'org.videolan.vlc', 'lua')
         elif opsys == 'Windows':
             if not config:
                 config = os.path.join(os.getenv('APPDATA'), 'vlc')

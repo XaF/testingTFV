@@ -125,8 +125,8 @@ class CommandUpdate(CommandInstallUpdateDelete):
         )
 
     def run(self, dry_run, yes, system, service, service_host, service_port,
-            vlc_bin, vlc_config, vlc_lua, release_type, version, filepath,
-            action, ignore_dev, install_output):
+            vlc_bin, vlc_config, vlc_lua, vlc_verbose, release_type, version,
+            filepath, action, ignore_dev, install_output):
         if service and platform.system() != 'Windows':
             LOGGER.error('The service mode is not supported yet for {}'.format(
                 platform.system()))
@@ -146,7 +146,7 @@ class CommandUpdate(CommandInstallUpdateDelete):
             if release_type:
                 resp = requests.get(
                     'https://api.github.com/repos/XaF/testingTFV/releases')
-                #    'https://api.github.com/repos/XaF/TraktForVLC/releases')
+                    #'https://api.github.com/repos/XaF/TraktForVLC/releases')
 
                 if not resp.ok:
                     raise RuntimeError('Unable to get the releases from '
@@ -332,6 +332,8 @@ class CommandUpdate(CommandInstallUpdateDelete):
             command.extend(['--vlc-lua-directory', vlc_lua])
         if vlc_config:
             command.extend(['--vlc-config-directory', vlc_config])
+        if vlc_verbose:
+            command.extend(['--vlc-verbose', str(vlc_verbose)])
         if system:
             command.append('--system')
         if service:
